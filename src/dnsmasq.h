@@ -1185,6 +1185,7 @@ extern struct daemon {
   unsigned char *duid_config;
   char *dbus_name;
   char *ubus_name;
+  char *event_listen;          /* --event-listen=HOST:PORT for the lease event broadcast socket */
   char *dump_file;
   int dump_mask;
   unsigned long soa_sn, soa_refresh, soa_retry, soa_expiry;
@@ -1550,6 +1551,7 @@ void lease_set_interface(struct dhcp_lease *lease, int interface, time_t now);
 struct dhcp_lease *lease_find_by_client(unsigned char *hwaddr, int hw_len, int hw_type,  
 					unsigned char *clid, int clid_len);
 struct dhcp_lease *lease_find_by_addr(struct in_addr addr);
+struct dhcp_lease *lease_get_head(void);
 struct in_addr lease_find_max_addr(struct dhcp_context *context);
 void lease_prune(struct dhcp_lease *target, time_t now);
 void lease_update_from_configs(void);
@@ -1608,6 +1610,14 @@ void set_dbus_listeners(void);
 #  ifdef HAVE_DHCP
 void emit_dbus_signal(int action, struct dhcp_lease *lease, char *hostname);
 #  endif
+#endif
+
+/* event-socket.c */
+#ifdef HAVE_DHCP
+void event_socket_init(void);
+void event_socket_set_listeners(void);
+void event_socket_check(void);
+void emit_event_signal(int action, struct dhcp_lease *lease, char *hostname);
 #endif
 
 /* ubus.c */

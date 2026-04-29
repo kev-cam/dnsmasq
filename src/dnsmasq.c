@@ -462,6 +462,11 @@ int main (int argc, char **argv)
   die(_("UBus not available: set HAVE_UBUS in src/config.h"), NULL, EC_BADCONF);
 #endif
 
+#ifdef HAVE_DHCP
+  /* Lease event broadcast socket. No-op unless --event-listen was set. */
+  event_socket_init();
+#endif
+
   if (daemon->port != 0)
     pre_allocate_sfds();
 
@@ -1118,6 +1123,10 @@ int main (int argc, char **argv)
 	poll_listen(daemon->inotifyfd, POLLIN);
 #endif
 
+#ifdef HAVE_DHCP
+      event_socket_set_listeners();
+#endif
+
 #if defined(HAVE_LINUX_NETWORK)
       poll_listen(daemon->netlinkfd, POLLIN);
 #elif defined(HAVE_BSD_NETWORK)
@@ -1216,6 +1225,10 @@ int main (int argc, char **argv)
 
       if (poll_check(piperead, POLLIN))
 	async_event(piperead, now);
+
+#ifdef HAVE_DHCP
+      event_socket_check();
+#endif
       
 #ifdef HAVE_DBUS
       /* if we didn't create a DBus connection, retry now. */ 

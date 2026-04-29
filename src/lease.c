@@ -615,6 +615,11 @@ struct dhcp_lease *lease_find_by_client(unsigned char *hwaddr, int hw_len, int h
   return NULL;
 }
 
+struct dhcp_lease *lease_get_head(void)
+{
+  return leases;
+}
+
 struct dhcp_lease *lease_find_by_addr(struct in_addr addr)
 {
   struct dhcp_lease *lease;
@@ -624,7 +629,7 @@ struct dhcp_lease *lease_find_by_addr(struct in_addr addr)
 #ifdef HAVE_DHCP6
       if (lease->flags & (LEASE_TA | LEASE_NA))
 	continue;
-#endif  
+#endif
       if (lease->addr.s_addr == addr.s_addr)
 	return lease;
     }
@@ -1112,6 +1117,7 @@ int do_script_run(time_t now)
 #ifdef HAVE_DBUS
 	  emit_dbus_signal(ACTION_DEL, lease, lease->old_hostname);
 #endif
+	  emit_event_signal(ACTION_DEL, lease, lease->old_hostname);
 	  old_leases = lease->next;
 	  
 	  free(lease->old_hostname); 
@@ -1148,6 +1154,8 @@ int do_script_run(time_t now)
 	emit_dbus_signal((lease->flags & LEASE_NEW) ? ACTION_ADD : ACTION_OLD, lease,
 			 lease->fqdn ? lease->fqdn : lease->hostname);
 #endif
+	emit_event_signal((lease->flags & LEASE_NEW) ? ACTION_ADD : ACTION_OLD, lease,
+			  lease->fqdn ? lease->fqdn : lease->hostname);
 	lease->flags &= ~(LEASE_NEW | LEASE_CHANGED | LEASE_AUX_CHANGED | LEASE_EXP_CHANGED);
 	
 	/* this is used for the "add" call, then junked, since they're not in the database */

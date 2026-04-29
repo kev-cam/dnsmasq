@@ -184,6 +184,7 @@ struct myoption {
 #define LOPT_RANDPORT_LIM  375
 #define LOPT_FAST_RETRY    376
 #define LOPT_STALE_CACHE   377
+#define LOPT_EVENT_LISTEN  378
 
 #ifdef HAVE_GETOPT_LONG
 static const struct option opts[] =  
@@ -372,6 +373,7 @@ static const struct myoption opts[] =
     { "port-limit", 1, 0, LOPT_RANDPORT_LIM },
     { "fast-dns-retry", 2, 0, LOPT_FAST_RETRY },
     { "use-stale-cache", 0, 0 , LOPT_STALE_CACHE },
+    { "event-listen", 1, 0, LOPT_EVENT_LISTEN },
     { NULL, 0, 0, 0 }
   };
 
@@ -3228,6 +3230,10 @@ static int one_opt(int option, char *arg, char *errstr, char *gen_err, int comma
 	  daemon->local_ttl = (unsigned long)ttl;
 	break;
       }
+
+    case LOPT_EVENT_LISTEN:
+      daemon->event_listen = opt_string_alloc(arg);
+      break;
 
     case LOPT_FAST_RETRY:
       daemon->fast_retry_timeout = TIMEOUT;
