@@ -1,0 +1,132 @@
+#!/bin/bash
+# remake — rebuild dnsmasq with the same compile-time options as the
+# system's /usr/sbin/dnsmasq, so swap-dnsmasq doesn't need to filter
+# args (DNSSEC --trust-anchor=, etc.) when running the local build
+# in place of the package one.
+#
+# Reads the "Compile time options:" line from the system binary's
+# --version, maps each token to the corresponding HAVE_* flag, and
+# runs `make COPTS="..."`. If the system was built with i18n the
+# all-i18n target is used so .mo translations come along.
+#
+# Usage:
+#   ./remake               build only
+#   ./remake install       build + sudo make install
+#   ./remake clean         make clean and exit
+
+set -eu
+
+cd "$(dirname "$0")"
+
+case "${1:-build}" in
+  clean) make clean; exit 0 ;;
+  install|build) ACTION="${1:-build}" ;;
+  *) echo "usage: $0 [build|install|clean]" >&2; exit 2 ;;
+esac
+
+SYSTEM_BIN=/usr/sbin/dnsmasq
+[ -x "$SYSTEM_BIN" ] || {
+    echo "no $SYSTEM_BIN — install the distro's dnsmasq package first" >&2
+    exit 1
+}
+
+system_opts=$("$SYSTEM_BIN" --version 2>&1 \
+              | sed -n 's/.*[Cc]ompile time options: //p' | head -1)
+[ -n "$system_opts" ] || {
+    echo "couldn't read 'Compile time options:' from $SYSTEM_BIN --version" >&2
+    exit 1
+}
+
+# Map a system token to a HAVE_* flag. Tokens already on by default
+# in this source tree (DHCP, IPv6, …) map to nothing. "no-X" tokens
+# are dropped.
+COPTS=""
+WANT_I18N=0
+for tok in $system_opts; do
+    case "$tok" in
+        # Default-on; nothing to add.
+        IPv6|GNU-getopt|DHCP|DHCPv6|TFTP|ipset|auth|loop-detect|inotify|dumpfile)
+            ;;
+        # Off-by-default; turn on.
+        DBus)        COPTS="$COPTS -DHAVE_DBUS" ;;
+        UBus)        COPTS="$COPTS -DHAVE_UBUS" ;;
+        DNSSEC)      COPTS="$COPTS -DHAVE_DNSSEC" ;;
+        cryptohash)  COPTS="$COPTS -DHAVE_CRYPTOHASH" ;;
+        IDN)         COPTS="$COPTS -DHAVE_IDN" ;;
+        IDN2)        COPTS="$COPTS -DHAVE_LIBIDN2" ;;
+        conntrack)   COPTS="$COPTS -DHAVE_CONNTRACK" ;;
+        Lua)         COPTS="$COPTS -DHAVE_LUASCRIPT" ;;
+        nftset)      COPTS="$COPTS -DHAVE_NFTSET" ;;
+        # i18n is a make target, not a -D.
+        i18n)        WANT_I18N=1 ;;
+        no-*)        ;;  # explicitly disabled — leave off
+        *)           echo "remake: unknown system option '$tok' — skipping" >&2 ;;
+    esac
+done
+
+# Trim leading whitespace.
+COPTS="${COPTS# }"
+
+echo "system: $system_opts"
+echo "COPTS:  $COPTS"
+echo
+
+# Translate the COPTS we just picked into the dev packages the build
+# will look for via pkg-config. Anything missing → bail with a clear
+# `apt install …` line rather than a cryptic compile error.
+declare -A NEEDS_PKG=(
+    [HAVE_DBUS]="libdbus-1-dev"
+    [HAVE_LIBIDN2]="libidn2-dev"
+    [HAVE_IDN]="libidn-dev"
+    [HAVE_CONNTRACK]="libnetfilter-conntrack-dev"
+    [HAVE_LUASCRIPT]="liblua5.2-dev"
+    [HAVE_DNSSEC]="nettle-dev libgmp-dev"
+    [HAVE_CRYPTOHASH]="nettle-dev"
+    [HAVE_NFTSET]="libnftables-dev"
+)
+declare -A NEEDS_PC=(
+    [HAVE_DBUS]="dbus-1"
+    [HAVE_LIBIDN2]="libidn2"
+    [HAVE_IDN]="libidn"
+    [HAVE_CONNTRACK]="libnetfilter_conntrack"
+    [HAVE_LUASCRIPT]="lua5.2"
+    [HAVE_DNSSEC]="nettle hogweed"
+    [HAVE_CRYPTOHASH]="nettle"
+)
+miss_pkgs=""
+for flag in "${!NEEDS_PKG[@]}"; do
+    if [[ "$COPTS" == *"-D$flag"* ]]; then
+        for p in ${NEEDS_PC[$flag]:-}; do
+            if ! pkg-config --exists "$p" 2>/dev/null; then
+                miss_pkgs="$miss_pkgs ${NEEDS_PKG[$flag]}"
+                break
+            fi
+        done
+    fi
+done
+if [ -n "$miss_pkgs" ]; then
+    miss_pkgs=$(echo $miss_pkgs | tr ' ' '\n' | sort -u | tr '\n' ' ')
+    echo "missing build deps. install with:"
+    echo "  sudo apt install $miss_pkgs"
+    exit 1
+fi
+
+make clean
+if [ "$WANT_I18N" = 1 ]; then
+    make all-i18n COPTS="$COPTS"
+else
+    make COPTS="$COPTS"
+fi
+
+echo
+src/dnsmasq --version 2>&1 | head -3
+
+if [ "$ACTION" = install ]; then
+    echo
+    echo "Installing..."
+    if [ "$(id -u)" -eq 0 ]; then
+        if [ "$WANT_I18N" = 1 ]; then make install-i18n; else make install; fi
+    else
+        if [ "$WANT_I18N" = 1 ]; then sudo make install-i18n; else sudo make install; fi
+    fi
+fi
