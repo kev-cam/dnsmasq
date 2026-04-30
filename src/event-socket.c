@@ -31,6 +31,7 @@ struct event_client {
 
 static int listen_fd = -1;
 static struct event_client *clients = NULL;
+static time_t start_time = 0;     /* set in event_socket_init */
 
 /* Parse "host:port" into sockaddr_in. host may be a v4 dotted-quad
    or 0.0.0.0 / *. Stored in *sa_out, port stored separately. */
@@ -122,6 +123,7 @@ void event_socket_init(void)
   /* Non-blocking accept — consumers come and go. */
   fcntl(listen_fd, F_SETFL, O_NONBLOCK);
 
+  start_time = time(NULL);
   my_syslog(LOG_INFO, _("event-socket: listening on %s"), spec);
 }
 
@@ -280,6 +282,39 @@ void event_socket_set_listeners(void)
 {
   if (listen_fd != -1)
     poll_listen(listen_fd, POLLIN);
+}
+
+/* SIGUSR2 hook: emit an uptime INFO line so consumers can tell how
+   long this dnsmasq has been running without consulting systemd. */
+void event_socket_dump_uptime(void)
+{
+  char buf[128];
+  size_t len;
+  struct event_client **pp, *c;
+  time_t now;
+
+  if (listen_fd == -1 || !clients)
+    return;
+  now = time(NULL);
+  len = (size_t)snprintf(buf, sizeof(buf),
+                         "INFO action=uptime ts=%lld up=%lld started=%lld\n",
+                         (long long)now,
+                         (long long)(now - start_time),
+                         (long long)start_time);
+  if (len == 0 || len >= sizeof(buf))
+    return;
+  pp = &clients;
+  while ((c = *pp))
+    {
+      if (try_write(c->fd, buf, len))
+        pp = &c->next;
+      else
+        {
+          close(c->fd);
+          *pp = c->next;
+          free(c);
+        }
+    }
 }
 
 /* SIGUSR1 hook: write one INFO line per current lease to every

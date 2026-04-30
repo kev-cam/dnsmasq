@@ -1584,6 +1584,12 @@ static void async_event(int pipe, time_t now)
 	   we leave them logging to the old file. */
 	if (daemon->log_file != NULL)
 	  log_reopen(daemon->log_file);
+#ifdef HAVE_DHCP
+	/* Patched: also write an uptime INFO line on the event socket
+	   so attached consumers can see how long this dnsmasq has been
+	   serving without parsing the unit's start time. */
+	event_socket_dump_uptime();
+#endif
 	break;
 
       case EVENT_NEWADDR:

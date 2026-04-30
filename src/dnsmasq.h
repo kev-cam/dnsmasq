@@ -1619,6 +1619,7 @@ void event_socket_init(void);
 void event_socket_set_listeners(void);
 void event_socket_check(void);
 void event_socket_dump_all(void);
+void event_socket_dump_uptime(void);
 void emit_event_signal(int action, struct dhcp_lease *lease, char *hostname);
 #endif
 
