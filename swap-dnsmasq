@@ -1,0 +1,81 @@
+#!/bin/bash
+# swap-dnsmasq — switch between the distro-packaged dnsmasq.service and
+# the patched /usr/local/sbin/dnsmasq built from this repo. The local
+# build runs as a transient systemd unit (dnsmasq-local.service)
+# launched with the same argv as dnsmasq.service, so config + pidfile +
+# user/group all match.
+#
+# Usage:
+#   sudo ./swap-dnsmasq local     # stop system service, run /usr/local one
+#   sudo ./swap-dnsmasq system    # stop /usr/local one, restart system
+#   sudo ./swap-dnsmasq status    # which is running, plus binary versions
+
+set -eu
+
+LOCAL_BIN=/usr/local/sbin/dnsmasq
+SYSTEM_BIN=/usr/sbin/dnsmasq
+LOCAL_UNIT=dnsmasq-local
+
+# Pull the system unit's ExecStart= so the local build runs with the
+# exact same flags + config-file + user/group as the package install.
+# Output looks like:
+#   { path=/usr/sbin/dnsmasq ; argv[]=/usr/sbin/dnsmasq -x ...
+# We extract the argv[] portion.
+system_argv() {
+    systemctl show -p ExecStart dnsmasq.service 2>/dev/null \
+        | sed -n 's/.*argv\[\]=\([^;]*\).*/\1/p' \
+        | head -1
+}
+
+cmd="${1:-status}"
+
+case "$cmd" in
+  local)
+    [ "$(id -u)" -eq 0 ] || { echo "must be root" >&2; exit 1; }
+    [ -x "$LOCAL_BIN" ] || {
+        echo "no $LOCAL_BIN — run 'make install' in this repo first" >&2
+        exit 1
+    }
+    argv=$(system_argv)
+    [ -n "$argv" ] || {
+        echo "couldn't read dnsmasq.service ExecStart" >&2
+        exit 1
+    }
+    # First token is the original binary path; drop it, keep the rest.
+    set -- $argv
+    shift
+    systemctl stop dnsmasq.service 2>/dev/null || true
+    # Run with --keep-in-foreground so systemd's simple-service watcher
+    # tracks the process correctly. Without it dnsmasq daemonises and
+    # systemd-run thinks the unit died immediately.
+    systemd-run \
+        --unit="$LOCAL_UNIT" \
+        --description="patched dnsmasq from /usr/local (swap-dnsmasq)" \
+        --collect \
+        "$LOCAL_BIN" --keep-in-foreground "$@"
+    echo "started $LOCAL_UNIT — $LOCAL_BIN --keep-in-foreground $*"
+    ;;
+
+  system)
+    [ "$(id -u)" -eq 0 ] || { echo "must be root" >&2; exit 1; }
+    systemctl stop "$LOCAL_UNIT.service" 2>/dev/null || true
+    systemctl start dnsmasq.service
+    echo "started dnsmasq.service"
+    ;;
+
+  status)
+    for u in dnsmasq.service "$LOCAL_UNIT.service"; do
+        s=$(systemctl is-active "$u" 2>&1 || true)
+        printf "%-25s %s\n" "$u" "$s"
+    done
+    [ -x "$SYSTEM_BIN" ] && \
+        echo "$SYSTEM_BIN: $($SYSTEM_BIN --version 2>&1 | head -1)"
+    [ -x "$LOCAL_BIN" ] && \
+        echo "$LOCAL_BIN: $($LOCAL_BIN --version 2>&1 | head -1)"
+    ;;
+
+  *)
+    echo "usage: $0 local|system|status" >&2
+    exit 2
+    ;;
+esac
