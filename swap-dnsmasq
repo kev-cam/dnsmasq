@@ -53,8 +53,22 @@ case "$cmd" in
         exit 1
     }
     # First token is the original binary path; drop it, keep the rest.
+    # Filter out --trust-anchor=... / --dnssec* if our local build was
+    # compiled without HAVE_DNSSEC — those would be rejected as
+    # "unsupported option" and the daemon would refuse to start.
     set -- $argv
     shift
+    if "$LOCAL_BIN" --version 2>&1 | grep -q 'no-DNSSEC'; then
+        filtered=
+        for a in "$@"; do
+            case "$a" in
+                --trust-anchor=*|--dnssec*) ;;
+                *) filtered="$filtered $a" ;;
+            esac
+        done
+        # shellcheck disable=SC2086
+        set -- $filtered
+    fi
     systemctl stop dnsmasq.service 2>/dev/null || true
     # Wait for the pid file to be released (dnsmasq holds it until exit).
     for _ in 1 2 3 4 5; do
