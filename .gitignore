@@ -4,3 +4,6 @@ btree.html
 cut
 md5sum
 src/.smak_history
+src/*.o
+src/dnsmasq
+src/.copts_*
