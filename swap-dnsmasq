@@ -15,6 +15,10 @@ set -eu
 LOCAL_BIN=/usr/local/sbin/dnsmasq
 SYSTEM_BIN=/usr/sbin/dnsmasq
 LOCAL_UNIT=dnsmasq-local
+# The patched build's lease-event socket. Override by exporting
+# EVENT_LISTEN before running, e.g.
+#   EVENT_LISTEN=127.0.0.1:7532  swap-dnsmasq local
+EVENT_LISTEN="${EVENT_LISTEN:-0.0.0.0:7532}"
 
 # Read the running dnsmasq's actual argv from /proc so we run the
 # local build with the same flags. We can't trust dnsmasq.service's
@@ -82,8 +86,10 @@ case "$cmd" in
         --unit="$LOCAL_UNIT" \
         --description="patched dnsmasq from /usr/local (swap-dnsmasq)" \
         --collect \
-        "$LOCAL_BIN" --keep-in-foreground "$@"
-    echo "started $LOCAL_UNIT — $LOCAL_BIN --keep-in-foreground $*"
+        "$LOCAL_BIN" --keep-in-foreground \
+        --event-listen="$EVENT_LISTEN" "$@"
+    echo "started $LOCAL_UNIT — $LOCAL_BIN --keep-in-foreground" \
+         "--event-listen=$EVENT_LISTEN $*"
     ;;
 
   system)
