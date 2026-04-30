@@ -121,12 +121,13 @@ if [ -n "$miss_pkgs" ]; then
     exit 1
 fi
 
+# Always use the plain `make` target. The all-i18n target invokes make
+# again for each .po file without passing COPTS, which causes
+# dnsmasq.c to get recompiled with empty -D flags and clobbers the
+# proper build. We only lose translations (the binary still works in
+# English), which is fine for swap-dnsmasq's purposes.
 make clean
-if [ "$WANT_I18N" = 1 ]; then
-    make all-i18n COPTS="$COPTS"
-else
-    make COPTS="$COPTS"
-fi
+make COPTS="$COPTS"
 
 echo
 src/dnsmasq --version 2>&1 | head -3
@@ -134,9 +135,13 @@ src/dnsmasq --version 2>&1 | head -3
 if [ "$ACTION" = install ]; then
     echo
     echo "Installing..."
+    # COPTS *must* be passed again — the Makefile's incremental
+    # dependency check is keyed on the MD5 of `cpp + COPTS`, and a
+    # second make with empty COPTS would re-trigger a full rebuild
+    # without our -D flags and clobber the binary.
     if [ "$(id -u)" -eq 0 ]; then
-        if [ "$WANT_I18N" = 1 ]; then make install-i18n; else make install; fi
+        make install COPTS="$COPTS"
     else
-        if [ "$WANT_I18N" = 1 ]; then sudo make install-i18n; else sudo make install; fi
+        sudo make install COPTS="$COPTS"
     fi
 fi
