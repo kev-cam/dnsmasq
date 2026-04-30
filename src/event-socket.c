@@ -125,12 +125,13 @@ void event_socket_init(void)
   my_syslog(LOG_INFO, _("event-socket: listening on %s"), spec);
 }
 
-/* Format a single event line into buf. Returns bytes written
-   (excluding null), 0 on overflow. */
-static size_t fmt_event(char *buf, size_t buflen,
-                        const char *action,
-                        struct dhcp_lease *lease,
-                        const char *hostname)
+/* Format a single line into buf. `tag` is the line type (EVENT or INFO).
+   Returns bytes written (excluding null), 0 on overflow. */
+static size_t fmt_line(char *buf, size_t buflen,
+                       const char *tag,
+                       const char *action,
+                       struct dhcp_lease *lease,
+                       const char *hostname)
 {
   char macbuf[64];
   char addrbuf[ADDRSTRLEN];
@@ -156,9 +157,17 @@ static size_t fmt_event(char *buf, size_t buflen,
     }
 
   return (size_t)snprintf(buf, buflen,
-                          "EVENT action=%s ts=%lld mac=%s ip=%s hostname=%s\n",
-                          action, (long long)time(NULL),
+                          "%s action=%s ts=%lld mac=%s ip=%s hostname=%s\n",
+                          tag, action, (long long)time(NULL),
                           macbuf, addrbuf, hostname);
+}
+
+static size_t fmt_event(char *buf, size_t buflen,
+                        const char *action,
+                        struct dhcp_lease *lease,
+                        const char *hostname)
+{
+  return fmt_line(buf, buflen, "EVENT", action, lease, hostname);
 }
 
 /* Best-effort write. Drop the client on EPIPE/closed-connection
@@ -271,6 +280,40 @@ void event_socket_set_listeners(void)
 {
   if (listen_fd != -1)
     poll_listen(listen_fd, POLLIN);
+}
+
+/* SIGUSR1 hook: write one INFO line per current lease to every
+   attached consumer. Useful for ad-hoc debugging without forcing
+   them to reconnect (which would re-trigger an `action=have` flood
+   anyway). */
+void event_socket_dump_all(void)
+{
+  char buf[512];
+  size_t len;
+  struct dhcp_lease *l;
+  struct event_client **pp, *c;
+
+  if (listen_fd == -1 || !clients)
+    return;
+
+  for (l = lease_get_head(); l; l = l->next)
+    {
+      len = fmt_line(buf, sizeof(buf), "INFO", "have", l, l->hostname);
+      if (len == 0 || len >= sizeof(buf))
+        continue;
+      pp = &clients;
+      while ((c = *pp))
+        {
+          if (try_write(c->fd, buf, len))
+            pp = &c->next;
+          else
+            {
+              close(c->fd);
+              *pp = c->next;
+              free(c);
+            }
+        }
+    }
 }
 
 #endif /* HAVE_DHCP */

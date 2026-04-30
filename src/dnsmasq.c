@@ -1513,6 +1513,12 @@ static void async_event(int pipe, time_t now)
       case EVENT_DUMP:
 	if (daemon->port != 0)
 	  dump_cache(now);
+#ifdef HAVE_DHCP
+	/* Patched: also dump lease state to anyone attached to the
+	   --event-listen broadcast socket. Useful for ad-hoc debug
+	   without having to reconnect. */
+	event_socket_dump_all();
+#endif
 	break;
 	
       case EVENT_ALARM:
