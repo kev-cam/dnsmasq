@@ -1185,7 +1185,8 @@ extern struct daemon {
   unsigned char *duid_config;
   char *dbus_name;
   char *ubus_name;
-  char *event_listen;          /* --event-listen=HOST:PORT for the lease event broadcast socket */
+  char *event_listen;          /* --event-listen=HOST:PORT override (default 0.0.0.0:7532) */
+  int event_listen_disabled;   /* --no-event-listen turns the broadcast socket off */
   char *dump_file;
   int dump_mask;
   unsigned long soa_sn, soa_refresh, soa_retry, soa_expiry;

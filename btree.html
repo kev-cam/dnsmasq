@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Build Tree</title>
+<style>
+body { font-family: monospace; margin: 20px; background: #1e1e1e; color: #d4d4d4; }
+h1, h2 { color: #569cd6; }
+.layer { margin: 20px 0; padding: 10px; border: 1px solid #3c3c3c; border-radius: 5px; }
+.layer-title { font-weight: bold; color: #dcdcaa; margin-bottom: 10px; }
+.target { padding: 5px 10px; margin: 2px 0; cursor: pointer; border-radius: 3px; }
+.target:hover { background: #2d2d2d; }
+.ok { color: #4ec9b0; }
+.stale { color: #f14c4c; }
+.dirty { color: #569cd6; }
+.indicator { color: #808080; margin-right: 5px; }
+.info-panel { display: none; position: fixed; top: 50px; right: 20px; width: 400px;
+              background: #252526; border: 1px solid #3c3c3c; border-radius: 5px;
+              padding: 15px; max-height: 80vh; overflow-y: auto; }
+.info-panel.visible { display: block; }
+.info-panel h3 { color: #dcdcaa; margin-top: 0; }
+.info-panel pre { background: #1e1e1e; padding: 10px; border-radius: 3px;
+                  overflow-x: auto; white-space: pre-wrap; }
+.info-panel .label { color: #569cd6; }
+.close-btn { float: right; cursor: pointer; color: #808080; }
+.close-btn:hover { color: #d4d4d4; }
+.legend { margin-bottom: 20px; }
+.legend span { margin-right: 20px; }
+</style>
+</head>
+<body>
+<h1>Build Tree: all</h1>
+<div class="legend">
+  <span class="ok">&#9679; OK (up-to-date)</span>
+  <span class="stale">&#9679; Stale (needs rebuild)</span>
+  <span class="dirty">&#9679; Dirty (marked for rebuild)</span>
+</div>
+<div id="info-panel" class="info-panel">
+  <span class="close-btn" onclick="hideInfo()">&times;</span>
+  <h3 id="info-target"></h3>
+  <div id="info-content"></div>
+</div>
+<script>
+var targetInfo = {
+  'src/radv.o': {
+    status: 'ok',
+    exists: true,
+    size: 17112,
+    mtime: 1771030055,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/radv.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c radv.c	\n',
+    postBuild: ''
+  },
+  'src/poll.o': {
+    status: 'ok',
+    exists: true,
+    size: 2688,
+    mtime: 1771030054,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/poll.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c poll.c	\n',
+    postBuild: ''
+  },
+  'src/option.o': {
+    status: 'ok',
+    exists: true,
+    size: 145984,
+    mtime: 1771030057,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/option.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c option.c	\n',
+    postBuild: ''
+  },
+  'src/rfc3315.o': {
+    status: 'ok',
+    exists: true,
+    size: 46088,
+    mtime: 1771030055,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/rfc3315.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c rfc3315.c	\n',
+    postBuild: ''
+  },
+  'src/tftp.o': {
+    status: 'ok',
+    exists: true,
+    size: 17528,
+    mtime: 1771030055,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/tftp.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c tftp.c	\n',
+    postBuild: ''
+  },
+  'src/lease.o': {
+    status: 'ok',
+    exists: true,
+    size: 24880,
+    mtime: 1771030054,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/lease.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c lease.c	\n',
+    postBuild: ''
+  },
+  'src/dhcp6.o': {
+    status: 'ok',
+    exists: true,
+    size: 15328,
+    mtime: 1771030054,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/dhcp6.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c dhcp6.c	\n',
+    postBuild: ''
+  },
+  'src/network.o': {
+    status: 'ok',
+    exists: true,
+    size: 29784,
+    mtime: 1771030056,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/network.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c network.c	\n',
+    postBuild: ''
+  },
+  'src/edns0.o': {
+    status: 'ok',
+    exists: true,
+    size: 7776,
+    mtime: 1771030055,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/edns0.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c edns0.c	\n',
+    postBuild: ''
+  },
+  'all': {
+    status: 'stale',
+    exists: false,
+    size: 0,
+    mtime: 0,
+    deps: ['src'],
+    execDir: '/usr/local/src/dnsmasq',
+    siblings: [],
+    compoundParent: '',
+    rule: '@cd src && /usr/local/src/smak/test/../smak  top="/usr/local/src/dnsmasq"  build_cflags="-DVERSION=\'\\"`/usr/local/src/dnsmasq/bld/get-version /usr/local/src/dnsmasq`\\"\' `echo  | /usr/local/src/dnsmasq/bld/pkg-wrapper HAVE_DBUS pkg-config --cflags dbus-1`  `echo  | /usr/local/src/dnsmasq/bld/pkg-wrapper HAVE_LIBIDN2 pkg-config --cflags libidn2` `echo  | /usr/local/src/dnsmasq/bld/pkg-wrapper HAVE_IDN pkg-config --cflags libidn`  `echo  | /usr/local/src/dnsmasq/bld/pkg-wrapper HAVE_CONNTRACK pkg-config --cflags libnetfilter_conntrack` `echo  | /usr/local/src/dnsmasq/bld/pkg-wrapper HAVE_LUASCRIPT pkg-config --cflags lua5.2`  `echo  | /usr/local/src/dnsmasq/bld/pkg-wrapper HAVE_DNSSEC     pkg-config --cflags \'nettle hogweed\'                                                         HAVE_CRYPTOHASH pkg-config --cflags nettle                                                         HAVE_NETTLEHASH pkg-config --cflags nettle` `echo  | /usr/local/src/dnsmasq/bld/pkg-wrapper HAVE_NFTSET pkg-config --cflags libnftables` "  build_libs="`echo  | /usr/local/src/dnsmasq/bld/pkg-wrapper HAVE_DBUS pkg-config --libs dbus-1`  `echo  | /usr/local/src/dnsmasq/bld/pkg-wrapper HAVE_LIBIDN2 pkg-config --libs libidn2` `echo  | /usr/local/src/dnsmasq/bld/pkg-wrapper HAVE_IDN pkg-config --libs libidn`  `echo  | /usr/local/src/dnsmasq/bld/pkg-wrapper HAVE_CONNTRACK pkg-config --libs libnetfilter_conntrack` `echo  | /usr/local/src/dnsmasq/bld/pkg-wrapper HAVE_LUASCRIPT pkg-config --libs lua5.2`  `if uname | grep SunOS >/dev/null 2>&1; then echo -lsocket -lnsl -lposix4; fi` `echo  | /usr/local/src/dnsmasq/bld/pkg-wrapper HAVE_DNSSEC     pkg-config --libs \'nettle hogweed\'                                                         HAVE_CRYPTOHASH pkg-config --libs nettle                                                         HAVE_NETTLEHASH pkg-config --libs nettle` `echo  | /usr/local/src/dnsmasq/bld/pkg-wrapper HAVE_DNSSEC NO_GMP --copy -lgmp` `echo  | /usr/local/src/dnsmasq/bld/pkg-wrapper HAVE_UBUS "" --copy \'-lubox -lubus\'` `echo  | /usr/local/src/dnsmasq/bld/pkg-wrapper HAVE_NFTSET pkg-config --libs libnftables`"  -f /usr/local/src/dnsmasq/Makefile dnsmasq \n',
+    postBuild: ''
+  },
+  'src/cache.o': {
+    status: 'ok',
+    exists: true,
+    size: 46432,
+    mtime: 1771030056,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/cache.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c cache.c	\n',
+    postBuild: ''
+  },
+  'src/ubus.o': {
+    status: 'ok',
+    exists: true,
+    size: 928,
+    mtime: 1771030054,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/ubus.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c ubus.c	\n',
+    postBuild: ''
+  },
+  'src/domain-match.o': {
+    status: 'ok',
+    exists: true,
+    size: 10360,
+    mtime: 1771030054,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/domain-match.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c domain-match.c	\n',
+    postBuild: ''
+  },
+  'src/hash-questions.o': {
+    status: 'ok',
+    exists: true,
+    size: 4088,
+    mtime: 1771030056,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/hash-questions.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c hash-questions.c	\n',
+    postBuild: ''
+  },
+  'src/dhcp.o': {
+    status: 'ok',
+    exists: true,
+    size: 19128,
+    mtime: 1771030054,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/dhcp.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c dhcp.c	\n',
+    postBuild: ''
+  },
+  'src/bpf.o': {
+    status: 'ok',
+    exists: true,
+    size: 928,
+    mtime: 1771030055,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/bpf.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c bpf.c	\n',
+    postBuild: ''
+  },
+  'src/tables.o': {
+    status: 'ok',
+    exists: true,
+    size: 936,
+    mtime: 1771030055,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/tables.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c tables.c	\n',
+    postBuild: ''
+  },
+  'src/arp.o': {
+    status: 'ok',
+    exists: true,
+    size: 4392,
+    mtime: 1771030054,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/arp.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c arp.c	\n',
+    postBuild: ''
+  },
+  'src/metrics.o': {
+    status: 'ok',
+    exists: true,
+    size: 2920,
+    mtime: 1771030055,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/metrics.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c metrics.c	\n',
+    postBuild: ''
+  },
+  'src/log.o': {
+    status: 'ok',
+    exists: true,
+    size: 11312,
+    mtime: 1771030056,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/log.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c log.c	\n',
+    postBuild: ''
+  },
+  'src/dnssec.o': {
+    status: 'ok',
+    exists: true,
+    size: 936,
+    mtime: 1771030056,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/dnssec.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c dnssec.c	\n',
+    postBuild: ''
+  },
+  'src/rfc1035.o': {
+    status: 'ok',
+    exists: true,
+    size: 33640,
+    mtime: 1771030055,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/rfc1035.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c rfc1035.c	\n',
+    postBuild: ''
+  },
+  'src/loop.o': {
+    status: 'ok',
+    exists: true,
+    size: 3144,
+    mtime: 1771030056,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/loop.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c loop.c	\n',
+    postBuild: ''
+  },
+  'src/netlink.o': {
+    status: 'ok',
+    exists: true,
+    size: 6400,
+    mtime: 1771030054,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/netlink.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c netlink.c	\n',
+    postBuild: ''
+  },
+  'src/dhcp-common.o': {
+    status: 'ok',
+    exists: true,
+    size: 26072,
+    mtime: 1771030056,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/dhcp-common.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c dhcp-common.c	\n',
+    postBuild: ''
+  },
+  'src/outpacket.o': {
+    status: 'ok',
+    exists: true,
+    size: 4528,
+    mtime: 1771030056,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/outpacket.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c outpacket.c	\n',
+    postBuild: ''
+  },
+  'src/crypto.o': {
+    status: 'ok',
+    exists: true,
+    size: 936,
+    mtime: 1771030055,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/crypto.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c crypto.c	\n',
+    postBuild: ''
+  },
+  'src/pattern.o': {
+    status: 'ok',
+    exists: true,
+    size: 936,
+    mtime: 1771030056,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/pattern.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c pattern.c	\n',
+    postBuild: ''
+  },
+  'src/blockdata.o': {
+    status: 'ok',
+    exists: true,
+    size: 5176,
+    mtime: 1771030055,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/blockdata.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c blockdata.c	\n',
+    postBuild: ''
+  },
+  'src/dnsmasq': {
+    status: 'stale',
+    exists: true,
+    size: 431088,
+    mtime: 1771030054,
+    deps: ['src/cache.o', 'src/rfc1035.o', 'src/util.o', 'src/option.o', 'src/forward.o', 'src/network.o', 'src/dnsmasq.o', 'src/dhcp.o', 'src/lease.o', 'src/rfc2131.o', 'src/netlink.o', 'src/dbus.o', 'src/bpf.o', 'src/helper.o', 'src/tftp.o', 'src/log.o', 'src/conntrack.o', 'src/dhcp6.o', 'src/rfc3315.o', 'src/dhcp-common.o', 'src/outpacket.o', 'src/radv.o', 'src/slaac.o', 'src/auth.o', 'src/ipset.o', 'src/pattern.o', 'src/domain.o', 'src/dnssec.o', 'src/blockdata.o', 'src/tables.o', 'src/loop.o', 'src/inotify.o', 'src/poll.o', 'src/rrfilter.o', 'src/edns0.o', 'src/arp.o', 'src/crypto.o', 'src/dump.o', 'src/ubus.o', 'src/metrics.o', 'src/hash-questions.o', 'src/domain-match.o', 'src/nftset.o'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc  -o dnsmasq cache.o rfc1035.o util.o option.o forward.o network.o        dnsmasq.o dhcp.o lease.o rfc2131.o netlink.o dbus.o bpf.o        helper.o tftp.o log.o conntrack.o dhcp6.o rfc3315.o        dhcp-common.o outpacket.o radv.o slaac.o auth.o ipset.o pattern.o        domain.o dnssec.o blockdata.o tables.o loop.o inotify.o        poll.o rrfilter.o edns0.o arp.o crypto.o dump.o ubus.o        metrics.o hash-questions.o domain-match.o nftset.o            \n',
+    postBuild: ''
+  },
+  'src/dnsmasq.o': {
+    status: 'ok',
+    exists: true,
+    size: 42296,
+    mtime: 1771030056,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/dnsmasq.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c dnsmasq.c	\n',
+    postBuild: ''
+  },
+  'src/conntrack.o': {
+    status: 'ok',
+    exists: true,
+    size: 936,
+    mtime: 1771030055,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/conntrack.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c conntrack.c	\n',
+    postBuild: ''
+  },
+  'src/domain.o': {
+    status: 'ok',
+    exists: true,
+    size: 5984,
+    mtime: 1771030055,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/domain.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c domain.c	\n',
+    postBuild: ''
+  },
+  'src/rrfilter.o': {
+    status: 'ok',
+    exists: true,
+    size: 5200,
+    mtime: 1771030054,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/rrfilter.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c rrfilter.c	\n',
+    postBuild: ''
+  },
+  'src/util.o': {
+    status: 'ok',
+    exists: true,
+    size: 17040,
+    mtime: 1771030054,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/util.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c util.c	\n',
+    postBuild: ''
+  },
+  'src/helper.o': {
+    status: 'ok',
+    exists: true,
+    size: 20176,
+    mtime: 1771030055,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/helper.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c helper.c	\n',
+    postBuild: ''
+  },
+  'src/slaac.o': {
+    status: 'ok',
+    exists: true,
+    size: 4880,
+    mtime: 1771030054,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/slaac.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c slaac.c	\n',
+    postBuild: ''
+  },
+  'src/nftset.o': {
+    status: 'ok',
+    exists: true,
+    size: 936,
+    mtime: 1771030055,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/nftset.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c nftset.c	\n',
+    postBuild: ''
+  },
+  'src/dbus.o': {
+    status: 'ok',
+    exists: true,
+    size: 928,
+    mtime: 1771030055,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/dbus.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c dbus.c	\n',
+    postBuild: ''
+  },
+  'src/rfc2131.o': {
+    status: 'ok',
+    exists: true,
+    size: 53232,
+    mtime: 1771030055,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/rfc2131.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c rfc2131.c	\n',
+    postBuild: ''
+  },
+  'src/auth.o': {
+    status: 'ok',
+    exists: true,
+    size: 21576,
+    mtime: 1771030056,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/auth.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c auth.c	\n',
+    postBuild: ''
+  },
+  'src/dump.o': {
+    status: 'ok',
+    exists: true,
+    size: 5920,
+    mtime: 1771030056,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/dump.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c dump.c	\n',
+    postBuild: ''
+  },
+  'src/forward.o': {
+    status: 'ok',
+    exists: true,
+    size: 34384,
+    mtime: 1771030055,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/forward.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c forward.c	\n',
+    postBuild: ''
+  },
+  'src/ipset.o': {
+    status: 'ok',
+    exists: true,
+    size: 4544,
+    mtime: 1771030056,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/ipset.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c ipset.c	\n',
+    postBuild: ''
+  },
+  'src/inotify.o': {
+    status: 'ok',
+    exists: true,
+    size: 7552,
+    mtime: 1771030055,
+    deps: ['src/.copts_c755dc5a7608f9af5e0d809cd38248f2', 'src/dnsmasq.h', 'src/config.h', 'src/dhcp-protocol.h', 'src/dhcp6-protocol.h', 'src/dns-protocol.h', 'src/radv-protocol.h', 'src/ip6addr.h', 'src/metrics.h', 'src/inotify.c'],
+    execDir: '/usr/local/src/dnsmasq/src',
+    siblings: [],
+    compoundParent: '',
+    rule: 'cc -Wall -W -O2   -DVERSION=\'"2.87rc1-22-ga5cbe6d"\'          -c inotify.c	\n',
+    postBuild: ''
+  },
+};
+function showInfo(target) {
+  var info = targetInfo[target];
+  if (!info) return;
+  document.getElementById('info-target').textContent = target;
+  var html = '<p><span class="label">Status:</span> <span class="' + info.status + '">' + info.status + '</span></p>';
+  if (info.exists) {
+    html += '<p><span class="label">Size:</span> ' + info.size + ' bytes</p>';
+    html += '<p><span class="label">Modified:</span> ' + new Date(info.mtime * 1000).toLocaleString() + '</p>';
+  } else {
+    html += '<p><span class="label">File:</span> does not exist</p>';
+  }
+  if (info.execDir && info.execDir !== '.') {
+    html += '<p><span class="label">Execution directory:</span> ' + info.execDir + '</p>';
+  }
+  if (info.compoundParent) {
+    html += '<p><span class="label">Built by compound target:</span> <span onclick="showInfo(\'' + info.compoundParent + '\')" style="cursor:pointer;text-decoration:underline">' + info.compoundParent + '</span></p>';
+  }
+  if (info.siblings && info.siblings.length > 1) {
+    html += '<p><span class="label">Multi-output siblings:</span></p><ul>';
+    info.siblings.forEach(function(s) {
+      var sinfo = targetInfo[s];
+      var cls = sinfo ? sinfo.status : 'stale';
+      html += '<li class="' + cls + '" onclick="showInfo(\'' + s + '\')" style="cursor:pointer">' + s + '</li>';
+    });
+    html += '</ul>';
+  }
+  if (info.deps.length > 0) {
+    html += '<p><span class="label">Dependencies:</span></p><ul>';
+    info.deps.forEach(function(d) {
+      var dinfo = targetInfo[d];
+      var cls = dinfo ? dinfo.status : 'stale';
+      html += '<li class="' + cls + '" onclick="showInfo(\'' + d + '\')" style="cursor:pointer">' + d + '</li>';
+    });
+    html += '</ul>';
+  }
+  if (info.rule) {
+    html += '<p><span class="label">Build command:</span></p><pre>' + info.rule.replace(/</g, '&lt;') + '</pre>';
+  }
+  if (info.postBuild) {
+    html += '<p><span class="label">Post-build:</span></p><pre>' + info.postBuild.replace(/</g, '&lt;') + '</pre>';
+  }
+  document.getElementById('info-content').innerHTML = html;
+  document.getElementById('info-panel').classList.add('visible');
+}
+function hideInfo() {
+  document.getElementById('info-panel').classList.remove('visible');
+}
+</script>
+<p>Build order: Layer 0 builds first, layer 1 builds last.</p>
+<div class="layer">
+<div class="layer-title">Layer 0 (builds first) [44 targets]</div>
+<div class="target stale" onclick="showInfo('all')">all</div>
+<div class="target ok" onclick="showInfo('src/arp.o')"><span class="indicator">[obj]</span>src/arp.o</div>
+<div class="target ok" onclick="showInfo('src/auth.o')"><span class="indicator">[obj]</span>src/auth.o</div>
+<div class="target ok" onclick="showInfo('src/blockdata.o')"><span class="indicator">[obj]</span>src/blockdata.o</div>
+<div class="target ok" onclick="showInfo('src/bpf.o')"><span class="indicator">[obj]</span>src/bpf.o</div>
+<div class="target ok" onclick="showInfo('src/cache.o')"><span class="indicator">[obj]</span>src/cache.o</div>
+<div class="target ok" onclick="showInfo('src/conntrack.o')"><span class="indicator">[obj]</span>src/conntrack.o</div>
+<div class="target ok" onclick="showInfo('src/crypto.o')"><span class="indicator">[obj]</span>src/crypto.o</div>
+<div class="target ok" onclick="showInfo('src/dbus.o')"><span class="indicator">[obj]</span>src/dbus.o</div>
+<div class="target ok" onclick="showInfo('src/dhcp-common.o')"><span class="indicator">[obj]</span>src/dhcp-common.o</div>
+<div class="target ok" onclick="showInfo('src/dhcp.o')"><span class="indicator">[obj]</span>src/dhcp.o</div>
+<div class="target ok" onclick="showInfo('src/dhcp6.o')"><span class="indicator">[obj]</span>src/dhcp6.o</div>
+<div class="target ok" onclick="showInfo('src/dnsmasq.o')"><span class="indicator">[obj]</span>src/dnsmasq.o</div>
+<div class="target ok" onclick="showInfo('src/dnssec.o')"><span class="indicator">[obj]</span>src/dnssec.o</div>
+<div class="target ok" onclick="showInfo('src/domain-match.o')"><span class="indicator">[obj]</span>src/domain-match.o</div>
+<div class="target ok" onclick="showInfo('src/domain.o')"><span class="indicator">[obj]</span>src/domain.o</div>
+<div class="target ok" onclick="showInfo('src/dump.o')"><span class="indicator">[obj]</span>src/dump.o</div>
+<div class="target ok" onclick="showInfo('src/edns0.o')"><span class="indicator">[obj]</span>src/edns0.o</div>
+<div class="target ok" onclick="showInfo('src/forward.o')"><span class="indicator">[obj]</span>src/forward.o</div>
+<div class="target ok" onclick="showInfo('src/hash-questions.o')"><span class="indicator">[obj]</span>src/hash-questions.o</div>
+<div class="target ok" onclick="showInfo('src/helper.o')"><span class="indicator">[obj]</span>src/helper.o</div>
+<div class="target ok" onclick="showInfo('src/inotify.o')"><span class="indicator">[obj]</span>src/inotify.o</div>
+<div class="target ok" onclick="showInfo('src/ipset.o')"><span class="indicator">[obj]</span>src/ipset.o</div>
+<div class="target ok" onclick="showInfo('src/lease.o')"><span class="indicator">[obj]</span>src/lease.o</div>
+<div class="target ok" onclick="showInfo('src/log.o')"><span class="indicator">[obj]</span>src/log.o</div>
+<div class="target ok" onclick="showInfo('src/loop.o')"><span class="indicator">[obj]</span>src/loop.o</div>
+<div class="target ok" onclick="showInfo('src/metrics.o')"><span class="indicator">[obj]</span>src/metrics.o</div>
+<div class="target ok" onclick="showInfo('src/netlink.o')"><span class="indicator">[obj]</span>src/netlink.o</div>
+<div class="target ok" onclick="showInfo('src/network.o')"><span class="indicator">[obj]</span>src/network.o</div>
+<div class="target ok" onclick="showInfo('src/nftset.o')"><span class="indicator">[obj]</span>src/nftset.o</div>
+<div class="target ok" onclick="showInfo('src/option.o')"><span class="indicator">[obj]</span>src/option.o</div>
+<div class="target ok" onclick="showInfo('src/outpacket.o')"><span class="indicator">[obj]</span>src/outpacket.o</div>
+<div class="target ok" onclick="showInfo('src/pattern.o')"><span class="indicator">[obj]</span>src/pattern.o</div>
+<div class="target ok" onclick="showInfo('src/poll.o')"><span class="indicator">[obj]</span>src/poll.o</div>
+<div class="target ok" onclick="showInfo('src/radv.o')"><span class="indicator">[obj]</span>src/radv.o</div>
+<div class="target ok" onclick="showInfo('src/rfc1035.o')"><span class="indicator">[obj]</span>src/rfc1035.o</div>
+<div class="target ok" onclick="showInfo('src/rfc2131.o')"><span class="indicator">[obj]</span>src/rfc2131.o</div>
+<div class="target ok" onclick="showInfo('src/rfc3315.o')"><span class="indicator">[obj]</span>src/rfc3315.o</div>
+<div class="target ok" onclick="showInfo('src/rrfilter.o')"><span class="indicator">[obj]</span>src/rrfilter.o</div>
+<div class="target ok" onclick="showInfo('src/slaac.o')"><span class="indicator">[obj]</span>src/slaac.o</div>
+<div class="target ok" onclick="showInfo('src/tables.o')"><span class="indicator">[obj]</span>src/tables.o</div>
+<div class="target ok" onclick="showInfo('src/tftp.o')"><span class="indicator">[obj]</span>src/tftp.o</div>
+<div class="target ok" onclick="showInfo('src/ubus.o')"><span class="indicator">[obj]</span>src/ubus.o</div>
+<div class="target ok" onclick="showInfo('src/util.o')"><span class="indicator">[obj]</span>src/util.o</div>
+</div>
+<div class="layer">
+<div class="layer-title">Layer 1 [1 target]</div>
+<div class="target stale" onclick="showInfo('src/dnsmasq')"><span class="indicator">[exe]</span>src/dnsmasq</div>
+</div>
+<p>Total: 45 targets in 2 layers</p>
+</body>
+</html>

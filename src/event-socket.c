@@ -77,14 +77,19 @@ void event_socket_init(void)
 {
   struct sockaddr_in sa;
   int yes = 1;
+  const char *spec;
 
-  if (!daemon->event_listen)
+  if (daemon->event_listen_disabled)
     return;
 
-  if (!parse_listen_spec(daemon->event_listen, &sa))
+  /* Default to all-interfaces:7532 if --event-listen= wasn't given.
+     The patched build's broadcast socket is on by default; pass
+     --no-event-listen to disable it. */
+  spec = daemon->event_listen ? daemon->event_listen : "0.0.0.0:7532";
+
+  if (!parse_listen_spec(spec, &sa))
     {
-      my_syslog(LOG_ERR, _("event-socket: bad --event-listen spec '%s'"),
-                daemon->event_listen);
+      my_syslog(LOG_ERR, _("event-socket: bad --event-listen spec '%s'"), spec);
       return;
     }
 
@@ -100,7 +105,7 @@ void event_socket_init(void)
   if (bind(listen_fd, (struct sockaddr *)&sa, sizeof(sa)) == -1)
     {
       my_syslog(LOG_ERR, _("event-socket: bind %s failed: %s"),
-                daemon->event_listen, strerror(errno));
+                spec, strerror(errno));
       close(listen_fd);
       listen_fd = -1;
       return;
@@ -117,7 +122,7 @@ void event_socket_init(void)
   /* Non-blocking accept — consumers come and go. */
   fcntl(listen_fd, F_SETFL, O_NONBLOCK);
 
-  my_syslog(LOG_INFO, _("event-socket: listening on %s"), daemon->event_listen);
+  my_syslog(LOG_INFO, _("event-socket: listening on %s"), spec);
 }
 
 /* Format a single event line into buf. Returns bytes written
