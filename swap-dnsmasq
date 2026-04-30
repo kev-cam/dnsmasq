@@ -16,15 +16,24 @@ LOCAL_BIN=/usr/local/sbin/dnsmasq
 SYSTEM_BIN=/usr/sbin/dnsmasq
 LOCAL_UNIT=dnsmasq-local
 
-# Pull the system unit's ExecStart= so the local build runs with the
-# exact same flags + config-file + user/group as the package install.
-# Output looks like:
-#   { path=/usr/sbin/dnsmasq ; argv[]=/usr/sbin/dnsmasq -x ...
-# We extract the argv[] portion.
-system_argv() {
-    systemctl show -p ExecStart dnsmasq.service 2>/dev/null \
-        | sed -n 's/.*argv\[\]=\([^;]*\).*/\1/p' \
-        | head -1
+# Read the running dnsmasq's actual argv from /proc so we run the
+# local build with the same flags. We can't trust dnsmasq.service's
+# ExecStart= because Debian/Ubuntu wrap dnsmasq behind /etc/init.d
+# (ExecStart points at a shell script that builds the real argv).
+# If dnsmasq isn't currently running, fall back to a sensible default.
+running_argv() {
+    local pid args
+    for pid in $(pgrep -x dnsmasq 2>/dev/null); do
+        args=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+        # Match a /usr/sbin/dnsmasq instance; ignore any other dnsmasq
+        # processes (e.g. our /usr/local one if it's already started).
+        case "$args" in
+            /usr/sbin/dnsmasq*) echo "$args"; return ;;
+        esac
+    done
+    echo "/usr/sbin/dnsmasq -x /run/dnsmasq/dnsmasq.pid"\
+         "-u dnsmasq -7 /etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new"\
+         "--local-service"
 }
 
 cmd="${1:-status}"
@@ -36,15 +45,22 @@ case "$cmd" in
         echo "no $LOCAL_BIN — run 'make install' in this repo first" >&2
         exit 1
     }
-    argv=$(system_argv)
+    # Capture argv BEFORE we stop the system service, so /proc still
+    # has the running process to read from.
+    argv=$(running_argv)
     [ -n "$argv" ] || {
-        echo "couldn't read dnsmasq.service ExecStart" >&2
+        echo "couldn't determine system dnsmasq argv" >&2
         exit 1
     }
     # First token is the original binary path; drop it, keep the rest.
     set -- $argv
     shift
     systemctl stop dnsmasq.service 2>/dev/null || true
+    # Wait for the pid file to be released (dnsmasq holds it until exit).
+    for _ in 1 2 3 4 5; do
+        [ -e /run/dnsmasq/dnsmasq.pid ] || break
+        sleep 0.2
+    done
     # Run with --keep-in-foreground so systemd's simple-service watcher
     # tracks the process correctly. Without it dnsmasq daemonises and
     # systemd-run thinks the unit died immediately.
