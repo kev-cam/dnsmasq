@@ -67,6 +67,16 @@ done
 # Trim leading whitespace.
 COPTS="${COPTS# }"
 
+# HAVE_CRYPTOHASH and HAVE_DNSSEC both make pkg-wrapper emit nettle
+# libs, separated by a newline that wrecks the link command. The
+# version output shows "cryptohash" whenever EITHER is set, so just
+# DNSSEC is enough — drop CRYPTOHASH if both came through.
+if [[ "$COPTS" == *HAVE_DNSSEC* && "$COPTS" == *HAVE_CRYPTOHASH* ]]; then
+    COPTS="${COPTS//-DHAVE_CRYPTOHASH/}"
+    COPTS="${COPTS//  / }"
+    COPTS="${COPTS# }"
+fi
+
 echo "system: $system_opts"
 echo "COPTS:  $COPTS"
 echo
