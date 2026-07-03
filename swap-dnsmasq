@@ -82,8 +82,8 @@ case "$cmd" in
         --unit="$LOCAL_UNIT" \
         --description="patched dnsmasq from /usr/local (swap-dnsmasq)" \
         --collect \
-        "$LOCAL_BIN" --keep-in-foreground "$@"
-    echo "started $LOCAL_UNIT — event-socket on by default at 0.0.0.0:7532"
+        "$LOCAL_BIN" --keep-in-foreground --event-listen=0.0.0.0:7533 "$@"
+    echo "started $LOCAL_UNIT — event-socket at 0.0.0.0:7533"
     ;;
 
   system)
