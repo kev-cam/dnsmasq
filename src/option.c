@@ -5646,6 +5646,19 @@ void read_opts(int argc, char **argv, char *compile_opts)
 
   free(argbuf);
 
+  /* net-mgr's overlay first, then the normal config.
+     BEFORE, not INSTEAD OF, and the ordering is deliberate in both directions:
+     the options net-mgr sets are additive (dhcp-hostsdir, hostsdir, server=,
+     address= all accumulate), while for anything single-valued the operator's
+     own file is read afterwards and therefore still wins. net-mgr adds; it
+     cannot silently override what an operator wrote by hand.
+
+     LOPT_CONF_OPT makes a missing file a no-op rather than a fatal error, which
+     is what lets the same binary run on a host that has no net-mgr at all.
+     Applies to an explicit -C too: -C says which MAIN config to use, not that
+     net-mgr's overlay should be skipped. */
+  one_file(NETMGR_CONFFILE, LOPT_CONF_OPT);
+
   if (conffile)
     {
       one_file(conffile, 0);

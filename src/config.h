@@ -222,6 +222,15 @@ RESOLVFILE
 #   endif
 #endif
 
+/* net-mgr overlay, read BEFORE CONFFILE (see read_opts in option.c).
+   Lets net-mgr configure this dnsmasq without ever editing the operator's
+   hand-maintained /etc/dnsmasq.conf -- the file whose breakage takes DNS and
+   DHCP down for the whole network. Optional: a missing file is not an error,
+   so a build that never sees one behaves exactly as before. */
+#ifndef NETMGR_CONFFILE
+#   define NETMGR_CONFFILE "/etc/net-mgr/dnsmasq.conf"
+#endif
+
 #ifndef RESOLVFILE
 #   if defined(__uClinux__)
 #      define RESOLVFILE "/etc/config/resolv.conf"
