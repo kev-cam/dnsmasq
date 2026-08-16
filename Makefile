@@ -24,7 +24,22 @@ MANDIR        = $(PREFIX)/share/man
 LOCALEDIR     = $(PREFIX)/share/locale
 BUILDDIR      = $(SRC)
 DESTDIR       = 
-CFLAGS        = -Wall -W -O2
+# -std=gnu17: this source predates C23 and is not valid C23.
+#
+# gcc 14+ defaults to C23, in which an empty parameter list means "takes NO
+# arguments" rather than the old "unspecified arguments". dnsmasq declares
+#     int iface_enumerate(int family, void *parm, int (callback)());
+# deliberately unprototyped, because the callback's real signature differs per
+# call site (iface_allowed_v4, iface_allowed_v6, complete_context, make_duid1,
+# filter_mac ... all take different arguments). Under C23 every one of those
+# call sites becomes "incompatible pointer type", which gcc now treats as an
+# error rather than a warning, and the build stops in network.c.
+#
+# Pinning the standard is the honest fix: the code is correct C17, and the
+# alternative -- rewriting iface_enumerate's contract and every callback to
+# share one prototype -- is a large change to well-tested code for no
+# behavioural gain. Distros carrying dnsmasq on modern toolchains do the same.
+CFLAGS        = -Wall -W -O2 -std=gnu17
 LDFLAGS       = 
 COPTS         = 
 RPM_OPT_FLAGS = 
