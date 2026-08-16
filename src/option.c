@@ -186,6 +186,8 @@ struct myoption {
 #define LOPT_STALE_CACHE   377
 #define LOPT_EVENT_LISTEN     378
 #define LOPT_NO_EVENT_LISTEN  379
+#define LOPT_NETMGR           380
+#define LOPT_NETMGR_LEASE     381
 
 #ifdef HAVE_GETOPT_LONG
 static const struct option opts[] =  
@@ -376,6 +378,8 @@ static const struct myoption opts[] =
     { "use-stale-cache", 0, 0 , LOPT_STALE_CACHE },
     { "event-listen", 1, 0, LOPT_EVENT_LISTEN },
     { "no-event-listen", 0, 0, LOPT_NO_EVENT_LISTEN },
+    { "netmgr", 2, 0, LOPT_NETMGR },
+    { "netmgr-lease", 1, 0, LOPT_NETMGR_LEASE },
     { NULL, 0, 0, 0 }
   };
 
@@ -3241,6 +3245,15 @@ static int one_opt(int option, char *arg, char *errstr, char *gen_err, int comma
       daemon->event_listen_disabled = 1;
       break;
 
+    case LOPT_NETMGR:
+      /* bare --netmgr means the local daemon on its default port */
+      daemon->netmgr_spec = opt_string_alloc(arg ? arg : "127.0.0.1:7531");
+      break;
+
+    case LOPT_NETMGR_LEASE:
+      daemon->netmgr_lease = opt_string_alloc(arg);
+      break;
+
     case LOPT_FAST_RETRY:
       daemon->fast_retry_timeout = TIMEOUT;
       
@@ -5506,6 +5519,33 @@ void reread_dhcp(void)
   /* Setup notify and read pre-existing files. */
   set_dynamic_inotify(AH_DHCP_HST | AH_DHCP_OPT, 0, NULL, 0);
 #  endif
+
+  /* net-mgr's records, applied LAST so they are rebuilt by the same
+     clear-and-rebuild that SIGHUP already performs. Doing it here rather than
+     in the client is what makes DELETIONS work: clear_dynamic_conf() above has
+     just dropped the previous generation, so a reservation removed in the
+     database simply does not come back. Adding records without clearing - the
+     obvious alternative - can never remove one.
+
+     Reads from memory, never a temp file. A scratch file would have to live
+     somewhere, and anywhere inside a watched --dhcp-hostsdir would be read as
+     real config the moment it was closed. */
+  {
+    size_t nlen = 0;
+    char *ndata = netmgr_bank_data(&nlen);
+    if (ndata && nlen)
+      {
+	FILE *f = fmemopen(ndata, nlen, "r");
+	if (f)
+	  {
+	    /* LOPT_BANK, not 0: with hard_opt 0 a single malformed line calls
+	       die() and takes the daemon down. Remote data must never be able
+	       to do that - a bad record should be logged and skipped. */
+	    read_file("<net-mgr>", f, LOPT_BANK, 0);
+	    fclose(f);
+	  }
+      }
+  }
 }
 #endif
 

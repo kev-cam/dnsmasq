@@ -465,6 +465,7 @@ int main (int argc, char **argv)
 #ifdef HAVE_DHCP
   /* Lease event broadcast socket. No-op unless --event-listen was set. */
   event_socket_init();
+  netmgr_init();
 #endif
 
   if (daemon->port != 0)
@@ -1077,6 +1078,17 @@ int main (int argc, char **argv)
       else if (is_dad_listeners() &&
 	       (timeout == -1 || timeout > 1000))
 	timeout = 1000;
+
+#ifdef HAVE_DHCP
+      /* The net-mgr client sometimes has work pending with NO file descriptor
+	 to wait on - between a doorbell and its reload, and while backing off
+	 before a reconnect. In both cases netmgr_set_listeners() registers
+	 nothing, so without this the poll below blocks until some unrelated
+	 event happens and the reload never runs. Same reason, and the same
+	 shape, as the dbus/tftp clamp above. */
+      if (netmgr_wants_wakeup() && (timeout == -1 || timeout > 500))
+	timeout = 500;
+#endif
       
       set_dns_listeners();
 
@@ -1125,6 +1137,7 @@ int main (int argc, char **argv)
 
 #ifdef HAVE_DHCP
       event_socket_set_listeners();
+      netmgr_set_listeners();
 #endif
 
 #if defined(HAVE_LINUX_NETWORK)
@@ -1228,6 +1241,7 @@ int main (int argc, char **argv)
 
 #ifdef HAVE_DHCP
       event_socket_check();
+      netmgr_check(now);
 #endif
       
 #ifdef HAVE_DBUS

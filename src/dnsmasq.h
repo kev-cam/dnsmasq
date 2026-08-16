@@ -1186,6 +1186,8 @@ extern struct daemon {
   char *dbus_name;
   char *ubus_name;
   char *event_listen;          /* --event-listen=HOST:PORT override (default 0.0.0.0:7532) */
+  char *netmgr_spec;           /* --netmgr=HOST:PORT, NULL = disabled */
+  char *netmgr_lease;          /* --netmgr-lease=TIME for pulled reservations */
   int event_listen_disabled;   /* --no-event-listen turns the broadcast socket off */
   char *dump_file;
   int dump_mask;
@@ -1454,6 +1456,12 @@ void read_opts (int argc, char **argv, char *compile_opts);
 char *option_string(int prot, unsigned int opt, unsigned char *val, 
 		    int opt_len, char *buf, int buf_len);
 void reread_dhcp(void);
+/* netmgr-client.c */
+void netmgr_init(void);
+void netmgr_set_listeners(void);
+void netmgr_check(time_t now);
+int netmgr_wants_wakeup(void);
+char *netmgr_bank_data(size_t *len);
 void read_servers_file(void);
 void set_option_bool(unsigned int opt);
 void reset_option_bool(unsigned int opt);
