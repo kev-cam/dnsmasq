@@ -67,8 +67,11 @@ static struct {
   struct sockaddr_in addr;
   char line[NM_BUFSZ];
   size_t linelen;
-  char *data;              /* accumulated bank lines for this snapshot */
+  char *data;              /* accumulated dhcp bank lines for this snapshot */
   size_t datalen, datacap;
+  char *hdata;             /* accumulated hosts lines for this snapshot */
+  size_t hlen, hcap;
+  unsigned int hindex;     /* cache source index for our host records */
   time_t retry_at, settle_at;
   int backoff;
   int dirty;               /* doorbell rang while loading/idle */
@@ -83,6 +86,7 @@ static void nm_close(int backoff)
   if (nm.fd != -1) { close(nm.fd); nm.fd = -1; }
   nm.linelen = 0;
   nm.datalen = 0;
+  nm.hlen = 0;
   if (backoff)
     {
       nm.state = NM_WAIT;
@@ -108,24 +112,32 @@ static int nm_send(const char *s)
   return 1;
 }
 
-/* Append to the snapshot buffer, growing as needed. Returns 0 on refusal. */
-static int nm_append(const char *s, size_t len)
+/* Append to one of the snapshot buffers, growing as needed. Returns 0 on
+   refusal (which is treated as "skip this record", never as fatal). */
+static int nm_buf_append(char **buf, size_t *len, size_t *cap,
+			 const char *s, size_t slen)
 {
-  if (nm.datalen + len + 1 > NM_MAXDATA) return 0;
-  if (nm.datalen + len + 1 > nm.datacap)
+  if (*len + slen + 1 > NM_MAXDATA) return 0;
+  if (*len + slen + 1 > *cap)
     {
-      size_t want = (nm.datacap ? nm.datacap * 2 : 8192);
-      while (want < nm.datalen + len + 1) want *= 2;
+      size_t want = (*cap ? *cap * 2 : 8192);
+      while (want < *len + slen + 1) want *= 2;
       char *p = whine_malloc(want);
       if (!p) return 0;
-      if (nm.data) { memcpy(p, nm.data, nm.datalen); free(nm.data); }
-      nm.data = p; nm.datacap = want;
+      if (*buf) { memcpy(p, *buf, *len); free(*buf); }
+      *buf = p; *cap = want;
     }
-  memcpy(nm.data + nm.datalen, s, len);
-  nm.datalen += len;
-  nm.data[nm.datalen] = 0;
+  memcpy(*buf + *len, s, slen);
+  *len += slen;
+  (*buf)[*len] = 0;
   return 1;
 }
+
+static int nm_append(const char *s, size_t len)
+{ return nm_buf_append(&nm.data, &nm.datalen, &nm.datacap, s, len); }
+
+static int nm_append_host(const char *s, size_t len)
+{ return nm_buf_append(&nm.hdata, &nm.hlen, &nm.hcap, s, len); }
 
 /* Extract key="value" or key=value from a net-mgr protocol line.
  * The wire form quotes any value containing whitespace, '=' or '"', and
@@ -181,8 +193,13 @@ static void nm_apply(void)
 {
   nm.ever_loaded = 1;
   reread_dhcp();
+  /* And the DNS side. cache_reload() is a full rebuild from every source, so
+     our names are re-read from the fresh buffer and anything deleted upstream
+     is simply gone - the same reason reread_dhcp() handles DHCP deletions. */
+  cache_reload();
   my_syslog(MS_DHCP | LOG_INFO,
-	    _("netmgr: applied %lu reservation(s)"), nm.applied);
+	    _("netmgr: applied %lu reservation(s), %lu name(s)"),
+	    nm.applied, (unsigned long)(nm.hlen ? nm.applied : 0));
 }
 
 /* The buffer option.c reads back when rebuilding. NULL when we have never
@@ -193,6 +210,22 @@ char *netmgr_bank_data(size_t *len)
   if (!nm.ever_loaded || !nm.data || !nm.datalen) return NULL;
   if (len) *len = nm.datalen;
   return nm.data;
+}
+
+char *netmgr_hosts_data(size_t *len)
+{
+  if (!nm.ever_loaded || !nm.hdata || !nm.hlen) return NULL;
+  if (len) *len = nm.hlen;
+  return nm.hdata;
+}
+
+/* Our slot in the cache's source-index space. Allocated once from the same
+   counter the addn-hosts files use, rather than hardcoded: SRC_AH is the BASE
+   of a dynamically allocated range, not a reserved value, so a fixed number
+   would collide with whichever addn-hosts file happened to take it. */
+unsigned int netmgr_hosts_index(void)
+{
+  return nm.hindex;
 }
 
 /* ---- protocol ------------------------------------------------------ */
@@ -214,6 +247,7 @@ static void nm_line(char *line)
       nm.state = NM_LOADING;
       nm.applied = 0;
       nm.datalen = 0;
+      nm.hlen = 0;
       return;
     }
 
@@ -244,6 +278,25 @@ static void nm_line(char *line)
 	: snprintf(buf, sizeof(buf), "%s,%s,%s\n", mac, ip, daemon->netmgr_lease);
       if (n > 0 && (size_t)n < sizeof(buf) && nm_append(buf, n))
 	nm.applied++;
+
+      /* Same record, hosts form: "<ip> <name>". dnsmasq's own hosts parser
+	 consumes it, so expand-hosts/domain apply exactly as they do to
+	 /etc/hosts and any addn-hosts file - we are not reimplementing name
+	 handling, only supplying the pairs.
+
+	 NOTE this uses the RESERVATION's name, which matches what the
+	 generated files contain under [dnsmasq] multihomed = short (still the
+	 deployed default). It does NOT yet apply the machine-primary-name join
+	 or the multi-homed qualification that net-gen-dnsmasq does under
+	 multihomed = qualified; that policy lives in Perl and duplicating it
+	 here is exactly how the two would drift. */
+      if (name[0])
+	{
+	  char hbuf[256];
+	  int hn = snprintf(hbuf, sizeof(hbuf), "%s %s\n", ip, name);
+	  if (hn > 0 && (size_t)hn < sizeof(hbuf))
+	    nm_append_host(hbuf, hn);
+	}
       return;
     }
 
@@ -331,6 +384,7 @@ void netmgr_init(void)
       return;
     }
   if (!daemon->netmgr_lease) daemon->netmgr_lease = "1440";
+  nm.hindex = alloc_hosts_index();
   nm.state = NM_WAIT;
   nm.retry_at = 0;                 /* connect on the first pass */
   my_syslog(MS_DHCP | LOG_INFO, _("netmgr: will pull reservations from %s:%d"),

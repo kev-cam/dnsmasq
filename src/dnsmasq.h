@@ -1315,6 +1315,8 @@ char *cache_get_cname_target(struct crec *crecp);
 struct crec *cache_enumerate(int init);
 int read_hostsfile(char *filename, unsigned int index, int cache_size, 
 		   struct crec **rhash, int hashsz);
+int read_hosts_stream(FILE *f, char *filename, unsigned int index, int cache_size,
+                      struct crec **rhash, int hashsz);
 
 /* blockdata.c */
 void blockdata_init(void);
@@ -1462,6 +1464,9 @@ void netmgr_set_listeners(void);
 void netmgr_check(time_t now);
 int netmgr_wants_wakeup(void);
 char *netmgr_bank_data(size_t *len);
+char *netmgr_hosts_data(size_t *len);
+unsigned int alloc_hosts_index(void);
+unsigned int netmgr_hosts_index(void);
 void read_servers_file(void);
 void set_option_bool(unsigned int opt);
 void reset_option_bool(unsigned int opt);

@@ -1138,19 +1138,31 @@ static int gettok(FILE *f, char *token)
 }
 
 int read_hostsfile(char *filename, unsigned int index, int cache_size, struct crec **rhash, int hashsz)
-{  
+{
   FILE *f = fopen(filename, "r");
-  char *token = daemon->namebuff, *domain_suffix = NULL;
-  int addr_count = 0, name_count = cache_size, lineno = 1;
-  unsigned int flags = 0;
-  union all_addr addr;
-  int atnl, addrlen = 0;
 
   if (!f)
     {
       my_syslog(LOG_ERR, _("failed to load names from %s: %s"), filename, strerror(errno));
       return cache_size;
     }
+
+  return read_hosts_stream(f, filename, index, cache_size, rhash, hashsz);
+}
+
+/* The body of read_hostsfile, taken from an already-open stream.
+   Split out so hosts records can also be ingested from memory (net-mgr's
+   pulled data) without staging them through a temporary file - a scratch file
+   would have to live somewhere, and anywhere inside a watched directory gets
+   read as real config the moment it is closed. `filename` is used only for log
+   messages here, so an in-memory caller can pass a display name. */
+int read_hosts_stream(FILE *f, char *filename, unsigned int index, int cache_size, struct crec **rhash, int hashsz)
+{  
+  char *token = daemon->namebuff, *domain_suffix = NULL;
+  int addr_count = 0, name_count = cache_size, lineno = 1;
+  unsigned int flags = 0;
+  union all_addr addr;
+  int atnl, addrlen = 0;
   
   lineno += eatspace(f);
   
@@ -1361,8 +1373,30 @@ void cache_reload(void)
       for (ah = daemon->addn_hosts; ah; ah = ah->next)
 	if (!(ah->flags & AH_INACTIVE))
 	  total_size = read_hostsfile(ah->fname, ah->index, total_size, (struct crec **)daemon->packet, revhashsz);
+
     }
   
+#ifdef HAVE_DHCP
+  /* net-mgr's names, from memory. Applied HERE, inside cache_reload and
+       after the file sources, because this is the only point where the
+       borrowed reverse-hash (daemon->packet) is live - and because
+       cache_reload is itself a full rebuild, a name removed in the database
+       is simply absent next time round rather than needing explicit
+       deletion. */
+  {
+      size_t hlen = 0;
+      char *hdata = netmgr_hosts_data(&hlen);
+      if (hdata && hlen)
+        {
+          FILE *hf = fmemopen(hdata, hlen, "r");
+          if (hf)
+            total_size = read_hosts_stream(hf, "<net-mgr>", netmgr_hosts_index(),
+      				     total_size, (struct crec **)daemon->packet,
+      				     revhashsz);
+        }
+  }
+#endif
+
   /* Make non-terminal records for all locally-define RRs */
   lrec.flags = F_FORWARD | F_CONFIG | F_NAMEP | F_IMMORTAL;
   

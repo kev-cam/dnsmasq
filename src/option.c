@@ -23,6 +23,18 @@ static volatile int mem_recover = 0;
 static jmp_buf mem_jmp;
 static int one_file(char *file, int hard_opt);
 
+/* Source-index allocator for hosts-style sources.
+   SRC_AH is the BASE of a dynamically allocated range, not a reserved slot, so
+   anything wanting its own index (an addn-hosts file, or net-mgr's in-memory
+   records) must take one from here rather than hardcode a number - a fixed
+   value would collide with whichever addn-hosts file happened to be given it. */
+static unsigned int hosts_index = SRC_AH;
+
+unsigned int alloc_hosts_index(void)
+{
+  return hosts_index++;
+}
+
 /* Solaris headers don't have facility names. */
 #ifdef HAVE_SOLARIS_NETWORK
 static const struct {
@@ -2176,9 +2188,9 @@ static int one_opt(int option, char *arg, char *errstr, char *gen_err, int comma
     case 'H':                /* --addn-hosts */
       {
 	struct hostsfile *new = opt_malloc(sizeof(struct hostsfile));
-	static unsigned int hosts_index = SRC_AH;
+	/* counter now at file scope - see alloc_hosts_index() */
 	new->fname = opt_string_alloc(arg);
-	new->index = hosts_index++;
+	new->index = alloc_hosts_index();
 	new->flags = 0;
 	if (option == 'H')
 	  {
