@@ -5,7 +5,8 @@
  * line per event; consumers read passively.
  *
  * Wire format:
- *   EVENT action=add ts=<unix> mac=<hex:..> ip=<v4-or-v6> hostname=<name>
+ *   EVENT action=add ts=<unix> expires=<unix|0> mac=<hex:..> ip=<v4-or-v6>
+ *         hostname=<name>
  *
  * action ∈ { add, del, old, have }. "have" is sent once per current
  * lease when a consumer connects, so it doesn't need to wait for the
@@ -160,9 +161,22 @@ static size_t fmt_line(char *buf, size_t buflen,
       inet_ntop(AF_INET, &lease->addr, addrbuf, ADDRSTRLEN);
     }
 
+  /* expires is the lease's own expiry, NOT ts (which is merely when we emitted
+     this line). Without it the consumer had no expiry at all, and every lease it
+     learned this way became immortal in net-mgr: a NULL expires reads as a
+     static binding, so the address never ages out of the map and
+     purge_expired_leases can never reach it.
+
+     Emitted verbatim in dnsmasq's own convention, the same value the lease FILE
+     carries (lease.c writes `%lu` of this field), so the socket and file import
+     paths agree: 0 means an INFINITE lease, otherwise an absolute unix time -
+     except under HAVE_BROKEN_RTC, where dnsmasq stores a duration here
+     (lease.c: `expires = ei` rather than `ei + now`). The consumer separates
+     those by magnitude rather than us second-guessing the build. */
   return (size_t)snprintf(buf, buflen,
-                          "%s action=%s ts=%lld mac=%s ip=%s hostname=%s\n",
+                          "%s action=%s ts=%lld expires=%lld mac=%s ip=%s hostname=%s\n",
                           tag, action, (long long)time(NULL),
+                          (long long)lease->expires,
                           macbuf, addrbuf, hostname);
 }
 
