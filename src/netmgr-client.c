@@ -193,11 +193,16 @@ static int nm_kv(const char *line, const char *key, char *out, size_t outsz)
 static void nm_apply(void)
 {
   nm.ever_loaded = 1;
-  reread_dhcp();
-  /* And the DNS side. cache_reload() is a full rebuild from every source, so
-     our names are re-read from the fresh buffer and anything deleted upstream
-     is simply gone - the same reason reread_dhcp() handles DHCP deletions. */
-  cache_reload();
+  /* clear_cache_and_reload() is dnsmasq's own reload, the one SIGHUP runs.
+     Hand-rolling reread_dhcp() + cache_reload() here was wrong twice over: it
+     skipped dhcp_update_configs / lease_update_from_configs / lease_update_dns,
+     so existing leases were not re-pointed at changed config, and it called
+     cache_reload() unconditionally - which SEGFAULTS when DNS is disabled
+     (--port=0), because the cache is never initialised and add_hosts_entry
+     walks a hash table that does not exist. That is not an exotic
+     configuration: it is a DHCP-only gateway. The real function guards it with
+     `if (daemon->port != 0)`. */
+  clear_cache_and_reload(dnsmasq_time());
   my_syslog(MS_DHCP | LOG_INFO,
 	    _("netmgr: applied %lu reservation(s), %lu byte(s) of names"),
 	    nm.applied, (unsigned long)nm.hlen);

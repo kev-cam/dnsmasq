@@ -27,6 +27,8 @@
 struct event_client {
   int fd;
   struct event_client *next;
+  char inbuf[256];         /* inbound query assembly - queries are short */
+  size_t inlen;
 };
 
 static int listen_fd = -1;
@@ -239,6 +241,194 @@ static void send_initial_state(int fd)
     }
 }
 
+
+/* ---- inbound queries ------------------------------------------------
+ *
+ * The socket was broadcast-only: it accepted connections, pushed lease events,
+ * and never read a byte. That meant nothing could ask dnsmasq the one question
+ * only dnsmasq can answer -- "what address would you actually give this MAC?"
+ * Outside tools had to re-implement the allocation algorithm and hope; the
+ * result is necessarily a guess, because the answer depends on this daemon's
+ * own lease table and on ICMP probing.
+ *
+ *   WHATIF mac=aa:bb:cc:dd:ee:ff [subnet=192.168.15.0]
+ *     -> WHATIF mac=... ip=... rule=reservation|lease|pool
+ *     -> WHATIF mac=... rule=none            (nothing would be offered)
+ *     -> WHATIF error=...
+ *
+ * The rules are evaluated in the same order dhcp_packet() would: a configured
+ * dhcp-host wins, then a live lease for that client, then allocation from a
+ * pool. `rule` is reported so a caller knows how much to trust the answer.
+ */
+
+static int wi_hex(const char *s, unsigned char *out, int max)
+{
+  int n = 0;
+  unsigned int v = 0;
+  int nyb = 0;
+  for (; *s; s++)
+    {
+      int d;
+      if (*s == ':' || *s == '-') continue;
+      if      (*s >= '0' && *s <= '9') d = *s - '0';
+      else if (*s >= 'a' && *s <= 'f') d = *s - 'a' + 10;
+      else if (*s >= 'A' && *s <= 'F') d = *s - 'A' + 10;
+      else return -1;
+      v = (v << 4) | (unsigned int)d;
+      if (++nyb == 2)
+	{
+	  if (n >= max) return -1;
+	  out[n++] = (unsigned char)v;
+	  v = 0; nyb = 0;
+	}
+    }
+  return nyb ? -1 : n;
+}
+
+static void wi_reply(int fd, const char *s)
+{
+  size_t len = strlen(s);
+  while (len)
+    {
+      ssize_t w = write(fd, s, len);
+      if (w <= 0) { if (errno == EINTR) continue; return; }
+      s += w; len -= w;
+    }
+}
+
+static void whatif(int fd, char *args)
+{
+  char out[256];
+  unsigned char hw[DHCP_CHADDR_MAX];
+  char macstr[64] = "", subnet[64] = "";
+  char *p;
+  int hwlen;
+
+  if ((p = strstr(args, "mac=")))
+    sscanf(p + 4, "%63[^ \t\r\n]", macstr);
+  if ((p = strstr(args, "subnet=")))
+    sscanf(p + 7, "%63[^ \t\r\n]", subnet);
+
+  if (!macstr[0] || (hwlen = wi_hex(macstr, hw, sizeof(hw))) <= 0)
+    {
+      wi_reply(fd, "WHATIF error=need mac=aa:bb:cc:dd:ee:ff" "\n");
+      return;
+    }
+
+#ifdef HAVE_DHCP
+  {
+    struct dhcp_config *cfg;
+    struct dhcp_lease *lease;
+    struct dhcp_context *ctx, *pick = NULL;
+    struct in_addr want;
+    int have_subnet = subnet[0] && inet_pton(AF_INET, subnet, &want) == 1;
+
+    /* 1. a configured dhcp-host beats everything */
+    cfg = find_config(daemon->dhcp_conf, NULL, NULL, 0, hw, hwlen, ARPHRD_ETHER, NULL, NULL);
+    if (cfg && (cfg->flags & CONFIG_ADDR))
+      {
+	snprintf(out, sizeof(out), "WHATIF mac=%s ip=%s rule=reservation\n",
+		 macstr, inet_ntoa(cfg->addr));
+	wi_reply(fd, out);
+	return;
+      }
+
+    /* 2. a live lease for this client is handed back unchanged */
+    if ((lease = lease_find_by_client(hw, hwlen, ARPHRD_ETHER, NULL, 0)))
+      {
+	snprintf(out, sizeof(out), "WHATIF mac=%s ip=%s rule=lease\n",
+		 macstr, inet_ntoa(lease->addr));
+	wi_reply(fd, out);
+	return;
+      }
+
+    /* 3. otherwise allocate, using dnsmasq's real algorithm. */
+    for (ctx = daemon->dhcp; ctx; ctx = ctx->next)
+      {
+	if (!have_subnet) { pick = ctx; break; }
+	/* Match on the RANGE, not on start&netmask. A context's netmask is
+	   only filled in by complete_context() once an interface matches, so
+	   on a box where this pool's subnet is not local it is still 0.0.0.0 -
+	   and `x & 0 == y & 0` is true for every address, which silently
+	   matched any subnet at all. Compare with the mask only when we
+	   actually have one. */
+	if (ctx->netmask.s_addr != 0)
+	  {
+	    if ((ctx->start.s_addr & ctx->netmask.s_addr) ==
+		(want.s_addr & ctx->netmask.s_addr))
+	      { pick = ctx; break; }
+	  }
+	else
+	  {
+	    unsigned long w = ntohl(want.s_addr);
+	    unsigned long a = ntohl(ctx->start.s_addr);
+	    unsigned long b = ntohl(ctx->end.s_addr);
+	    /* treat the query as "the /24 this pool lives in" */
+	    if ((w & 0xffffff00UL) >= (a & 0xffffff00UL) &&
+		(w & 0xffffff00UL) <= (b & 0xffffff00UL))
+	      { pick = ctx; break; }
+	  }
+      }
+    if (!pick)
+      {
+	snprintf(out, sizeof(out), "WHATIF mac=%s rule=none reason=no pool%s\n",
+		 macstr, have_subnet ? " on that subnet" : "");
+	wi_reply(fd, out);
+	return;
+      }
+    {
+      struct dhcp_context *saved = pick->current;
+      struct in_addr addr;
+      int ok;
+      /* Consider just this context, then restore the chain. loopback=1 is not
+	 a lie about the transport: it is how address_allocate is told to skip
+	 the ICMP probe, which must not happen here - a query has no business
+	 putting packets on the wire or blocking the daemon while it waits. */
+      pick->current = NULL;
+      ok = address_allocate(pick, &addr, hw, hwlen, NULL, dnsmasq_time(), 1);
+      pick->current = saved;
+      if (ok)
+	snprintf(out, sizeof(out), "WHATIF mac=%s ip=%s rule=pool\n",
+		 macstr, inet_ntoa(addr));
+      else
+	snprintf(out, sizeof(out), "WHATIF mac=%s rule=none reason=pool full\n",
+		 macstr);
+      wi_reply(fd, out);
+    }
+  }
+#else
+  wi_reply(fd, "WHATIF error=this dnsmasq has no DHCP support\n");
+#endif
+}
+
+/* Read whatever a client has sent and act on complete lines. */
+static void event_client_readable(struct event_client *c)
+{
+  char buf[256];
+  ssize_t n = read(c->fd, buf, sizeof(buf));
+  ssize_t i;
+
+  if (n <= 0)
+    return;                     /* EOF/error: reaped by the write path */
+
+  for (i = 0; i < n; i++)
+    {
+      if (buf[i] == '\n')
+	{
+	  c->inbuf[c->inlen] = 0;
+	  if (strncmp(c->inbuf, "WHATIF", 6) == 0)
+	    whatif(c->fd, c->inbuf + 6);
+	  else if (c->inlen)
+	    wi_reply(c->fd, "WHATIF error=unknown request\n");
+	  c->inlen = 0;
+	}
+      else if (c->inlen + 1 < sizeof(c->inbuf))
+	c->inbuf[c->inlen++] = buf[i];
+      else
+	c->inlen = 0;           /* overlong: drop, stay in sync */
+    }
+}
+
 void event_socket_check(void)
 {
   struct sockaddr_in sa;
@@ -249,6 +439,12 @@ void event_socket_check(void)
 
   if (listen_fd == -1)
     return;
+
+  /* Service any client that has ASKED us something before looking for new
+     connections. */
+  for (c = clients; c; c = c->next)
+    if (poll_check(c->fd, POLLIN))
+      event_client_readable(c);
 
   if (!poll_check(listen_fd, POLLIN))
     return;
@@ -269,6 +465,7 @@ void event_socket_check(void)
       return;
     }
   c->fd = fd;
+  c->inlen = 0;
   c->next = clients;
   clients = c;
 
@@ -280,8 +477,15 @@ void event_socket_check(void)
 
 void event_socket_set_listeners(void)
 {
+  struct event_client *c;
+
   if (listen_fd != -1)
     poll_listen(listen_fd, POLLIN);
+
+  /* Connected clients are now readable too: the socket used to be
+     broadcast-only, so nothing could ever ASK it anything. */
+  for (c = clients; c; c = c->next)
+    poll_listen(c->fd, POLLIN);
 }
 
 /* SIGUSR2 hook: emit an uptime INFO line so consumers can tell how
