@@ -51,6 +51,9 @@
 #define NM_BACKOFF_MIN 2
 #define NM_BACKOFF_MAX 120
 #define NM_SETTLE      2        /* seconds to coalesce a burst of doorbells */
+/* Defined once: this literal has been mangled by scripted edits more than once,
+   and three copies of it is three chances to get an embedded newline wrong. */
+#define NM_POLL_CMD   "POLL dnsmasq-conf\n"
 
 enum nm_state {
   NM_OFF = 0,      /* --netmgr not given */
@@ -73,7 +76,7 @@ static struct {
   char *hdata;             /* accumulated hosts lines for this snapshot */
   size_t hlen, hcap;
   unsigned int hindex;     /* cache source index for our host records */
-  time_t retry_at, settle_at, load_deadline;
+  time_t retry_at, settle_at, load_deadline, last_load;
   int backoff;
   int dirty;               /* doorbell rang while loading/idle */
   unsigned long applied;   /* records applied at last successful load */
@@ -140,45 +143,6 @@ static int nm_append(const char *s, size_t len)
 static int nm_append_host(const char *s, size_t len)
 { return nm_buf_append(&nm.hdata, &nm.hlen, &nm.hcap, s, len); }
 
-/* Extract key="value" or key=value from a net-mgr protocol line.
- * The wire form quotes any value containing whitespace, '=' or '"', and
- * doubles an embedded quote. Returns 0 if the key is absent. */
-static int nm_kv(const char *line, const char *key, char *out, size_t outsz)
-{
-  size_t klen = strlen(key);
-  const char *p = line;
-
-  while ((p = strstr(p, key)))
-    {
-      /* must be at a word boundary and followed by '=' */
-      if ((p != line && p[-1] != ' ') || p[klen] != '=') { p += klen; continue; }
-      p += klen + 1;
-      size_t n = 0;
-      if (*p == '"')
-	{
-	  p++;
-	  while (*p)
-	    {
-	      if (*p == '"')
-		{
-		  if (p[1] == '"') { p++; }        /* "" is a literal quote */
-		  else break;
-		}
-	      if (n + 1 < outsz) out[n++] = *p;
-	      p++;
-	    }
-	}
-      else
-	while (*p && *p != ' ')
-	  {
-	    if (n + 1 < outsz) out[n++] = *p;
-	    p++;
-	  }
-      out[n] = 0;
-      return 1;
-    }
-  return 0;
-}
 
 /* ---- applying a snapshot ------------------------------------------- */
 
@@ -193,6 +157,7 @@ static int nm_kv(const char *line, const char *key, char *out, size_t outsz)
 static void nm_apply(void)
 {
   nm.ever_loaded = 1;
+  nm.last_load = dnsmasq_time();
   /* clear_cache_and_reload() is dnsmasq's own reload, the one SIGHUP runs.
      Hand-rolling reread_dhcp() + cache_reload() here was wrong twice over: it
      skipped dhcp_update_configs / lease_update_from_configs / lease_update_dns,
@@ -456,6 +421,7 @@ void netmgr_init(void)
       return;
     }
   if (!daemon->netmgr_lease) daemon->netmgr_lease = "1440";
+  if (daemon->netmgr_refresh <= 0) daemon->netmgr_refresh = 30;
   nm.hindex = alloc_hosts_index();
   nm.state = NM_WAIT;
   nm.retry_at = 0;                 /* connect on the first pass */
@@ -504,6 +470,24 @@ void netmgr_check(time_t now)
       return;
     }
 
+  /* Periodic re-fetch, and the reason it is not merely a belt-and-braces extra:
+     the doorbell only rings on the node where a change ORIGINATES. Relay.pm
+     writes replicated rows straight to the DB without going through the
+     emit_change pipeline - deliberately, since that is what stops replication
+     loops - so a FOLLOWER never sees a stream event for a change made on the
+     master. On a gateway, whose changes all arrive by replication from nas3,
+     the doorbell therefore never rings at all: without this timer it would load
+     once at startup and then serve stale data forever. net-mgr's own file path
+     carries the same backstop in _sync_dnsmasq's signature poll. */
+  if (nm.state == NM_IDLE && !nm.dirty && daemon->netmgr_refresh > 0
+      && now >= nm.last_load + daemon->netmgr_refresh)
+    {
+      if (!nm_send(NM_POLL_CMD)) { nm_close(1); return; }
+      nm.state = NM_LOADING;
+      nm.load_deadline = now + 30;
+      return;
+    }
+
   /* A doorbell rang: re-fetch the whole rendered config once the burst settles,
      so a hundred reservations edited at once cost one reload rather than a
      hundred. POLL is request/response, so this is one more request on the
@@ -511,17 +495,32 @@ void netmgr_check(time_t now)
   if (nm.dirty && nm.state == NM_IDLE && now >= nm.settle_at)
     {
       nm.dirty = 0;
-      if (!nm_send("POLL dnsmasq-conf\n")) { nm_close(1); return; }
+      if (!nm_send(NM_POLL_CMD)) { nm_close(1); return; }
       nm.state = NM_LOADING;
       nm.load_deadline = now + 30;
     }
 }
 
 /* Does the main loop need waking sooner than its default timeout? */
-int netmgr_wants_wakeup(void)
+/* Milliseconds until this module next has something to do, or -1.
+   A boolean "do I want waking" forced the main loop to a 500ms tick forever,
+   which is a lot of wakeups on an idle gateway just to watch a 30s timer. */
+int netmgr_next_wakeup_ms(void)
 {
-  return nm.state == NM_WAIT || (nm.dirty && nm.state == NM_IDLE)
-      || nm.state == NM_LOADING;
+  time_t now = dnsmasq_time();
+  time_t due = 0;
+
+  if (nm.state == NM_OFF) return -1;
+  if (nm.state == NM_WAIT)                    due = nm.retry_at;
+  else if (nm.dirty && nm.state == NM_IDLE)   due = nm.settle_at;
+  else if (nm.state == NM_LOADING)            due = nm.load_deadline;
+  else if (nm.state == NM_IDLE && daemon->netmgr_refresh > 0)
+    due = nm.last_load + daemon->netmgr_refresh;
+  else return -1;
+
+  if (due <= now) return 0;
+  if (due - now > 3600) return -1;
+  return (int)((due - now) * 1000);
 }
 
 #endif /* HAVE_DHCP */

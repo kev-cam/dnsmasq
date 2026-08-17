@@ -1086,8 +1086,11 @@ int main (int argc, char **argv)
 	 nothing, so without this the poll below blocks until some unrelated
 	 event happens and the reload never runs. Same reason, and the same
 	 shape, as the dbus/tftp clamp above. */
-      if (netmgr_wants_wakeup() && (timeout == -1 || timeout > 500))
-	timeout = 500;
+      {
+	int nm_ms = netmgr_next_wakeup_ms();
+	if (nm_ms >= 0 && (timeout == -1 || timeout > nm_ms))
+	  timeout = nm_ms;
+      }
 #endif
       
       set_dns_listeners();

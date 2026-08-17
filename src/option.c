@@ -200,6 +200,7 @@ struct myoption {
 #define LOPT_NO_EVENT_LISTEN  379
 #define LOPT_NETMGR           380
 #define LOPT_NETMGR_LEASE     381
+#define LOPT_NETMGR_REFRESH   382
 
 #ifdef HAVE_GETOPT_LONG
 static const struct option opts[] =  
@@ -392,6 +393,7 @@ static const struct myoption opts[] =
     { "no-event-listen", 0, 0, LOPT_NO_EVENT_LISTEN },
     { "netmgr", 2, 0, LOPT_NETMGR },
     { "netmgr-lease", 1, 0, LOPT_NETMGR_LEASE },
+    { "netmgr-refresh", 1, 0, LOPT_NETMGR_REFRESH },
     { NULL, 0, 0, 0 }
   };
 
@@ -3264,6 +3266,10 @@ static int one_opt(int option, char *arg, char *errstr, char *gen_err, int comma
 
     case LOPT_NETMGR_LEASE:
       daemon->netmgr_lease = opt_string_alloc(arg);
+      break;
+
+    case LOPT_NETMGR_REFRESH:
+      daemon->netmgr_refresh = atoi(arg);
       break;
 
     case LOPT_FAST_RETRY:

@@ -1188,6 +1188,7 @@ extern struct daemon {
   char *event_listen;          /* --event-listen=HOST:PORT override (default 0.0.0.0:7532) */
   char *netmgr_spec;           /* --netmgr=HOST:PORT, NULL = disabled */
   char *netmgr_lease;          /* --netmgr-lease=TIME for pulled reservations */
+  int netmgr_refresh;          /* --netmgr-refresh=SECS periodic re-fetch, 0 = off */
   int event_listen_disabled;   /* --no-event-listen turns the broadcast socket off */
   char *dump_file;
   int dump_mask;
@@ -1462,7 +1463,7 @@ void reread_dhcp(void);
 void netmgr_init(void);
 void netmgr_set_listeners(void);
 void netmgr_check(time_t now);
-int netmgr_wants_wakeup(void);
+int netmgr_next_wakeup_ms(void);
 char *netmgr_bank_data(size_t *len);
 char *netmgr_hosts_data(size_t *len);
 unsigned int alloc_hosts_index(void);
