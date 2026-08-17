@@ -57,7 +57,8 @@ enum nm_state {
   NM_IDLE,         /* connected, snapshot applied, waiting for a doorbell */
   NM_CONNECTING,
   NM_GREETING,     /* HELLO sent */
-  NM_LOADING,      /* SUBSCRIBE sent, collecting ROWs until EOS */
+  NM_SUBSCRIBING,  /* SUBSCRIBE sent, waiting for its ack */
+  NM_LOADING,      /* POLL sent, waiting for the rendered payload */
   NM_WAIT          /* disconnected, backing off */
 };
 
@@ -65,14 +66,14 @@ static struct {
   int fd;
   enum nm_state state;
   struct sockaddr_in addr;
-  char line[NM_BUFSZ];
-  size_t linelen;
+  char *line;              /* growable: a POLL reply is one long base64 line */
+  size_t linelen, linecap;
   char *data;              /* accumulated dhcp bank lines for this snapshot */
   size_t datalen, datacap;
   char *hdata;             /* accumulated hosts lines for this snapshot */
   size_t hlen, hcap;
   unsigned int hindex;     /* cache source index for our host records */
-  time_t retry_at, settle_at;
+  time_t retry_at, settle_at, load_deadline;
   int backoff;
   int dirty;               /* doorbell rang while loading/idle */
   unsigned long applied;   /* records applied at last successful load */
@@ -198,8 +199,8 @@ static void nm_apply(void)
      is simply gone - the same reason reread_dhcp() handles DHCP deletions. */
   cache_reload();
   my_syslog(MS_DHCP | LOG_INFO,
-	    _("netmgr: applied %lu reservation(s), %lu name(s)"),
-	    nm.applied, (unsigned long)(nm.hlen ? nm.applied : 0));
+	    _("netmgr: applied %lu reservation(s), %lu byte(s) of names"),
+	    nm.applied, (unsigned long)nm.hlen);
 }
 
 /* The buffer option.c reads back when rebuilding. NULL when we have never
@@ -230,84 +231,134 @@ unsigned int netmgr_hosts_index(void)
 
 /* ---- protocol ------------------------------------------------------ */
 
+/* Decode base64 in place-ish; returns length written to out (out may alias in
+   only if out <= in, which it does not here). Unknown characters are skipped,
+   which is what makes this tolerant of the wire wrapping the payload. */
+static size_t nm_b64(const char *in, size_t inlen, char *out)
+{
+  static const char *T =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  unsigned int acc = 0; int bits = 0; size_t n = 0;
+  for (size_t i = 0; i < inlen; i++)
+    {
+      const char *q;
+      if (in[i] == '=') break;
+      if (!(q = strchr(T, in[i]))) continue;
+      acc = (acc << 6) | (unsigned int)(q - T);
+      bits += 6;
+      if (bits >= 8) { bits -= 8; out[n++] = (char)((acc >> bits) & 0xff); }
+    }
+  return n;
+}
+
+/* Split the rendered payload into its two banks.
+
+   The daemon returns one document with '#===' section markers rather than two
+   round trips, so DHCP and DNS can never be applied from different generations
+   of the database. '#' is a comment to BOTH of dnsmasq's parsers, so a marker
+   that ever leaked into a bank is inert rather than a syntax error. */
+static void nm_split_payload(char *p, size_t len)
+{
+  nm.datalen = 0;
+  nm.hlen = 0;
+  int sec = 0;                       /* 0 none, 1 dhcp, 2 hosts */
+  size_t i = 0;
+  nm.applied = 0;
+  while (i < len)
+    {
+      size_t j = i;
+      while (j < len && p[j] != '\n') j++;
+      size_t linelen = j - i;
+      char *line = p + i;
+      if (linelen >= 4 && strncmp(line, "#===", 4) == 0)
+	{
+	  if (memmem(line, linelen, "dhcp", 4))       sec = 1;
+	  else if (memmem(line, linelen, "hosts", 5)) sec = 2;
+	  else                                        sec = 0;
+	}
+      else if (linelen && sec)
+	{
+	  if (sec == 1) { nm_append(line, linelen); nm_append("\n", 1); nm.applied++; }
+	  else          { nm_append_host(line, linelen); nm_append_host("\n", 1); }
+	}
+      i = j + 1;
+    }
+}
+
 static void nm_line(char *line)
 {
   if (nm.state == NM_GREETING)
     {
       if (strncmp(line, "OK", 2) != 0)
 	{
-	  my_syslog(MS_DHCP | LOG_WARNING,
-		    _("netmgr: HELLO refused: %s"), line);
+	  my_syslog(MS_DHCP | LOG_WARNING, _("netmgr: HELLO refused: %s"), line);
 	  nm_close(1);
 	  return;
 	}
-      /* snapshot+stream: the snapshot is the state, the stream is the bell. */
-      if (!nm_send("SUBSCRIBE sub=1 mode=snapshot+stream FROM dhcp_reservations\n"))
+      /* mode=stream, NOT snapshot+stream: this subscription is only a doorbell.
+	 The content comes from POLL, so we do not want a snapshot of raw rows
+	 interleaving with the reply - and we do not want to render names here
+	 at all. That policy lives in one place, on the daemon side. */
+      if (!nm_send("SUBSCRIBE sub=1 mode=stream FROM dhcp_reservations\n"))
 	{ nm_close(1); return; }
-      nm.state = NM_LOADING;
-      nm.applied = 0;
-      nm.datalen = 0;
-      nm.hlen = 0;
+      nm.state = NM_SUBSCRIBING;
       return;
     }
 
-  if (strncmp(line, "ROW", 3) == 0)
+  if (nm.state == NM_SUBSCRIBING)
     {
-      if (nm.state != NM_LOADING)
+      if (strncmp(line, "ERR", 3) == 0)
 	{
-	  /* Streamed change = doorbell. Never applied on its own. */
-	  if (!nm.dirty)
-	    my_syslog(MS_DHCP | LOG_INFO,
-		      _("netmgr: change notified, reloading in %ds"), NM_SETTLE);
-	  nm.dirty = 1;
-	  nm.settle_at = dnsmasq_time() + NM_SETTLE;
+	  my_syslog(MS_DHCP | LOG_WARNING, _("netmgr: SUBSCRIBE: %s"), line);
+	  nm_close(1);
 	  return;
 	}
-      char mac[64], ip[64], name[128];
-      if (!nm_kv(line, "mac", mac, sizeof(mac))) return;
-      if (!nm_kv(line, "ip",  ip,  sizeof(ip)))  return;
-      if (!nm_kv(line, "name", name, sizeof(name))) name[0] = 0;
-
-      /* Bare "mac,name,ip,lease" - a --dhcp-hostsdir bank line is a list of
-	 option ARGUMENTS, not options, so the dhcp-host= keyword must NOT
-	 appear. With it, dnsmasq logs "bad hex constant" per line, which is a
-	 SOFT error: it starts happily having dropped every reservation. */
-      char buf[320];
-      int n = name[0]
-	? snprintf(buf, sizeof(buf), "%s,%s,%s,%s\n", mac, name, ip, daemon->netmgr_lease)
-	: snprintf(buf, sizeof(buf), "%s,%s,%s\n", mac, ip, daemon->netmgr_lease);
-      if (n > 0 && (size_t)n < sizeof(buf) && nm_append(buf, n))
-	nm.applied++;
-
-      /* Same record, hosts form: "<ip> <name>". dnsmasq's own hosts parser
-	 consumes it, so expand-hosts/domain apply exactly as they do to
-	 /etc/hosts and any addn-hosts file - we are not reimplementing name
-	 handling, only supplying the pairs.
-
-	 NOTE this uses the RESERVATION's name, which matches what the
-	 generated files contain under [dnsmasq] multihomed = short (still the
-	 deployed default). It does NOT yet apply the machine-primary-name join
-	 or the multi-homed qualification that net-gen-dnsmasq does under
-	 multihomed = qualified; that policy lives in Perl and duplicating it
-	 here is exactly how the two would drift. */
-      if (name[0])
-	{
-	  char hbuf[256];
-	  int hn = snprintf(hbuf, sizeof(hbuf), "%s %s\n", ip, name);
-	  if (hn > 0 && (size_t)hn < sizeof(hbuf))
-	    nm_append_host(hbuf, hn);
-	}
+      if (strncmp(line, "OK", 2) != 0) return;      /* ignore anything else */
+      if (!nm_send("POLL dnsmasq-conf\n")) { nm_close(1); return; }
+      nm.state = NM_LOADING;
       return;
     }
 
-  if (strncmp(line, "EOS", 3) == 0)
+  if (nm.state == NM_LOADING)
     {
-      if (nm.state == NM_LOADING)
+      if (strncmp(line, "ERR", 3) == 0)
 	{
-	  nm_apply();
-	  nm.state = NM_IDLE;
-	  nm.backoff = NM_BACKOFF_MIN;   /* a good load resets the backoff */
+	  my_syslog(MS_DHCP | LOG_WARNING, _("netmgr: POLL: %s"), line);
+	  nm_close(1);
+	  return;
 	}
+      /* Key on the PAYLOAD, not on the line merely starting with OK. Other OK
+	 acks share the connection, and treating the first one as the reply made
+	 the real payload arrive after we had already gone IDLE - where it was
+	 dropped as unknown. Symptom was a reload that logged "no output" and
+	 silently kept the previous generation. */
+      char *o = strstr(line, "output=");
+      if (!o) return;                    /* not our reply; keep waiting */
+      o += 7;
+      if (*o == '"') o++;
+      size_t enc = strlen(o);
+      char *dec = whine_malloc(enc + 1);
+      if (!dec) { nm.state = NM_IDLE; return; }
+      size_t dlen = nm_b64(o, enc, dec);
+      if (dlen)
+	{
+	  nm_split_payload(dec, dlen);
+	  nm_apply();
+	}
+      free(dec);
+      nm.state = NM_IDLE;
+      nm.backoff = NM_BACKOFF_MIN;      /* a good load resets the backoff */
+      return;
+    }
+
+  /* IDLE: any streamed ROW is a doorbell and nothing more. */
+  if (strncmp(line, "ROW", 3) == 0)
+    {
+      if (!nm.dirty)
+	my_syslog(MS_DHCP | LOG_INFO,
+		  _("netmgr: change notified, reloading in %ds"), NM_SETTLE);
+      nm.dirty = 1;
+      nm.settle_at = dnsmasq_time() + NM_SETTLE;
       return;
     }
 
@@ -333,14 +384,30 @@ static void nm_readable(void)
     {
       if (buf[i] == '\n')
 	{
-	  nm.line[nm.linelen] = 0;
-	  if (nm.linelen) nm_line(nm.line);
+	  if (nm.linelen)
+	    {
+	      nm.line[nm.linelen] = 0;
+	      nm_line(nm.line);
+	    }
 	  nm.linelen = 0;
 	}
-      else if (nm.linelen + 1 < sizeof(nm.line))
-	nm.line[nm.linelen++] = buf[i];
       else
-	nm.linelen = 0;          /* overlong line: drop it, stay in sync */
+	{
+	  /* Grow rather than truncate: the rendered config arrives base64'd on
+	     a single line and is tens of kilobytes. A fixed buffer here would
+	     silently drop it and look like an empty config. */
+	  if (nm.linelen + 2 > nm.linecap)
+	    {
+	      size_t want = nm.linecap ? nm.linecap * 2 : NM_BUFSZ;
+	      while (want < nm.linelen + 2) want *= 2;
+	      if (want > NM_MAXDATA) { nm.linelen = 0; continue; }
+	      char *p = whine_malloc(want);
+	      if (!p) { nm.linelen = 0; continue; }
+	      if (nm.line) { memcpy(p, nm.line, nm.linelen); free(nm.line); }
+	      nm.line = p; nm.linecap = want;
+	    }
+	  nm.line[nm.linelen++] = buf[i];
+	}
     }
 }
 
@@ -423,23 +490,33 @@ void netmgr_check(time_t now)
   if (nm.fd != -1 && poll_check(nm.fd, POLLIN))
     nm_readable();
 
-  /* A doorbell rang: re-take the whole snapshot once the burst settles, so a
-     hundred reservations edited at once cost one reload rather than a hundred. */
+  /* A reply that never arrives must not wedge us in LOADING forever - drop the
+     connection and let the normal backoff/reconnect path retry. */
+  if (nm.state == NM_LOADING && nm.load_deadline && now > nm.load_deadline)
+    {
+      my_syslog(MS_DHCP | LOG_WARNING, _("netmgr: POLL timed out, reconnecting"));
+      nm_close(1);
+      return;
+    }
+
+  /* A doorbell rang: re-fetch the whole rendered config once the burst settles,
+     so a hundred reservations edited at once cost one reload rather than a
+     hundred. POLL is request/response, so this is one more request on the
+     connection we already have - no reconnect and no re-SUBSCRIBE. */
   if (nm.dirty && nm.state == NM_IDLE && now >= nm.settle_at)
     {
       nm.dirty = 0;
-      if (!nm_send("SUBSCRIBE sub=1 mode=snapshot+stream FROM dhcp_reservations\n"))
-	{ nm_close(1); return; }
+      if (!nm_send("POLL dnsmasq-conf\n")) { nm_close(1); return; }
       nm.state = NM_LOADING;
-      nm.applied = 0;
-      nm.datalen = 0;
+      nm.load_deadline = now + 30;
     }
 }
 
 /* Does the main loop need waking sooner than its default timeout? */
 int netmgr_wants_wakeup(void)
 {
-  return nm.state == NM_WAIT || (nm.dirty && nm.state == NM_IDLE);
+  return nm.state == NM_WAIT || (nm.dirty && nm.state == NM_IDLE)
+      || nm.state == NM_LOADING;
 }
 
 #endif /* HAVE_DHCP */
