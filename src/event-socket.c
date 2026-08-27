@@ -36,6 +36,7 @@ struct event_client {
   time_t joined;           /* when it connected, for the auth deadline */
   char nonce[33];          /* challenge we issued; the signed payload */
   char principal[128];     /* identity it claims, checked against signers */
+  int role;                /* ROLE_READER or ROLE_UPDATER once authed */
   int sigfd;               /* temp file collecting the armored signature */
   size_t siglen;           /* bytes taken, so a client cannot fill the disk */
   char sigpath[64];
@@ -440,10 +441,23 @@ static void whatif(int fd, char *args)
  *
  * A client now proves who it is before it is told anything. We issue a
  * random nonce; the client returns an SSHSIG over it; we hand the pair to
- * `ssh-keygen -Y verify` against the allowed-signers file that nas3
- * installs with the dnsmasq deploy. That file holds nas3's key alone, so
- * the master is the only thing that can attach - every other node gets
- * lease data by normal replication rather than by reading this socket.
+ * `ssh-keygen -Y verify` against /etc/net-mgr/allowed_dns, which nas3
+ * installs with the dnsmasq deploy.
+ *
+ * That file is an ssh allowed_signers list split into two sections:
+ *
+ *     [readers]     may attach and consume the lease stream
+ *     [updaters]    may additionally issue commands on the socket
+ *
+ * ssh-keygen knows nothing about sections and would reject a header, so
+ * section_to_file() resolves one section at a time into a temp file in the
+ * bare format before handing it over. Lines appearing before any header are
+ * treated as [readers], so a plain unsectioned list still works and grants
+ * only read access - the safe reading of an ambiguous file.
+ *
+ * nas3 goes in [updaters]: the master is the authority here, and every
+ * other node gets lease data by normal replication rather than by reading
+ * this socket directly.
  *
  * THE FILE IS THE GATE. With no allowed-signers file we keep the old open
  * behaviour and say so in the log, so a gateway rebuilt before its key has
@@ -454,14 +468,18 @@ static void whatif(int fd, char *args)
  * a few tens of ms. That is confined to the connect path - consumers
  * attach once and hold - so no lease traffic is delayed by it.
  */
-#define EVENT_SIGNERS   "/etc/net-mgr/event-allowed_signers"
+#define EVENT_ALLOWED   "/etc/net-mgr/allowed_dns"
+#define EVENT_SEC_READERS  "readers"
+#define EVENT_SEC_UPDATERS "updaters"
+#define ROLE_READER   0
+#define ROLE_UPDATER  1
 #define EVENT_SIG_NS    "netmgr-event"
 #define EVENT_AUTH_SECS 20        /* prove it inside this, or be dropped */
 #define EVENT_SIG_MAX   8192      /* an SSHSIG is ~600 bytes; cap the rest */
 
 static int event_auth_enabled(void)
 {
-  return access(EVENT_SIGNERS, R_OK) == 0;
+  return access(EVENT_ALLOWED, R_OK) == 0;
 }
 
 /* 32 hex chars from the kernel. Failure is fatal to the connection: we
@@ -503,10 +521,75 @@ static int principal_ok(const char *p)
   return 1;
 }
 
+/* Copy one [section] of EVENT_ALLOWED into a temp file in the bare
+   allowed_signers format, which is all ssh-keygen understands - it would
+   reject a section header outright, so the sections are resolved here.
+   Lines before any header count as [readers], so a plain unsectioned list
+   still works and grants only read access. Returns 1 and fills pathbuf
+   when the section held at least one entry. */
+static int section_to_file(const char *want, char *pathbuf, size_t pathsz)
+{
+  FILE *in, *out;
+  int fd, n = 0, in_section;
+  char line[512];
+
+  if (pathsz < 32 || !(in = fopen(EVENT_ALLOWED, "r")))
+    return 0;
+
+  strcpy(pathbuf, "/tmp/dnsmasq-evsec-XXXXXX");
+  if ((fd = mkstemp(pathbuf)) == -1)
+    {
+      fclose(in);
+      return 0;
+    }
+  if (!(out = fdopen(fd, "w")))
+    {
+      close(fd);
+      unlink(pathbuf);
+      fclose(in);
+      return 0;
+    }
+
+  in_section = (strcmp(want, EVENT_SEC_READERS) == 0);
+  while (fgets(line, sizeof(line), in))
+    {
+      char *s = line;
+
+      while (*s == ' ' || *s == '\t')
+        s++;
+      if (*s == '[')
+        {
+          char *e = strchr(s, ']');
+          if (e)
+            {
+              *e = 0;
+              in_section = (strcmp(s + 1, want) == 0);
+            }
+          continue;
+        }
+      if (*s == '#' || *s == '\n' || *s == '\r' || *s == 0)
+        continue;
+      if (!in_section)
+        continue;
+      fputs(line, out);
+      n++;
+    }
+  fclose(in);
+  fclose(out);
+
+  if (n == 0)
+    {
+      unlink(pathbuf);
+      pathbuf[0] = 0;
+      return 0;
+    }
+  return 1;
+}
+
 /* ssh-keygen -Y verify reads the signed message on stdin. Exit 0 means the
    signature is good AND the signers file vouches for that principal. */
 static int verify_sig(const char *principal, const char *sigpath,
-                      const char *nonce)
+                      const char *nonce, const char *signers)
 {
   int p[2], status;
   pid_t pid;
@@ -535,7 +618,7 @@ static int verify_sig(const char *principal, const char *sigpath,
           close(devnull);
         }
       execlp("ssh-keygen", "ssh-keygen", "-Y", "verify",
-             "-f", EVENT_SIGNERS, "-I", principal,
+             "-f", signers, "-I", principal,
              "-n", EVENT_SIG_NS, "-s", sigpath, (char *)NULL);
       _exit(127);
     }
@@ -584,22 +667,41 @@ static void sig_append(struct event_client *c, const char *line)
 
 static void auth_finish(struct event_client *c)
 {
-  int ok;
+  char signers[64];
+  int ok = 0;
 
   close(c->sigfd);
   c->sigfd = -1;
-  ok = verify_sig(c->principal, c->sigpath, c->nonce);
+
+  /* [updaters] is tried first so a principal listed in both sections gets
+     the higher role rather than whichever section happened to come first. */
+  if (section_to_file(EVENT_SEC_UPDATERS, signers, sizeof(signers)))
+    {
+      ok = verify_sig(c->principal, c->sigpath, c->nonce, signers);
+      unlink(signers);
+      if (ok)
+        c->role = ROLE_UPDATER;
+    }
+  if (!ok && section_to_file(EVENT_SEC_READERS, signers, sizeof(signers)))
+    {
+      ok = verify_sig(c->principal, c->sigpath, c->nonce, signers);
+      unlink(signers);
+      if (ok)
+        c->role = ROLE_READER;
+    }
+
   unlink(c->sigpath);
   c->sigpath[0] = 0;
 
   if (!ok)
     {
-      auth_fail(c, "signature did not verify");
+      auth_fail(c, "no [readers] or [updaters] entry verified the signature");
       return;
     }
 
   c->authed = 1;
-  my_syslog(LOG_INFO, _("event-socket: authenticated %s"), c->principal);
+  my_syslog(LOG_INFO, _("event-socket: authenticated %s as %s"), c->principal,
+            c->role == ROLE_UPDATER ? "updater" : "reader");
   try_write(c->fd, "OK\n", 3);
   send_initial_state(c->fd);
 }
@@ -693,6 +795,9 @@ static void event_client_readable(struct event_client *c)
 	  c->inbuf[c->inlen] = 0;
 	  if (c->authed != 1)
 	    auth_line(c, c->inbuf);
+	  else if (c->inlen && c->role != ROLE_UPDATER)
+	    /* [readers] may consume the stream but not drive the socket. */
+	    wi_reply(c->fd, "ERR not permitted for a reader\n");
 	  else if (strncmp(c->inbuf, "WHATIF", 6) == 0)
 	    whatif(c->fd, c->inbuf + 6);
 	  else if (c->inlen)
@@ -748,6 +853,7 @@ void event_socket_check(void)
   c->inlen = 0;
   c->authed = 1;
   c->joined = time(NULL);
+  c->role = ROLE_READER;
   c->sigfd = -1;
   c->siglen = 0;
   c->nonce[0] = 0;
@@ -783,7 +889,7 @@ void event_socket_check(void)
       warned_open = 1;
       my_syslog(LOG_WARNING,
                 _("event-socket: %s absent - serving lease state to any client"),
-                EVENT_SIGNERS);
+                EVENT_ALLOWED);
     }
 
   send_initial_state(fd);
