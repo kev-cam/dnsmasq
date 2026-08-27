@@ -227,11 +227,31 @@ static size_t nm_b64(const char *in, size_t inlen, char *out)
    round trips, so DHCP and DNS can never be applied from different generations
    of the database. '#' is a comment to BOTH of dnsmasq's parsers, so a marker
    that ever leaked into a bank is inert rather than a syntax error. */
+/* STANDBY.
+ *
+ * A standby server must be RUNNING but must not answer: it holds its config,
+ * its lease file and its sockets, and starts serving the instant it is told
+ * to. Stopping the service instead loses all of that and makes failover a
+ * restart rather than a flag flip.
+ *
+ * It also lets the fleet record a standby's DHCP pool as INACTIVE rather than
+ * deleting it. Two pools covering one range are a duplicate-assignment fault
+ * only if both servers answer; if one is dormant the overlap is intent, not
+ * error, and net-reserve can say so instead of flagging a conflict the
+ * operator cannot resolve without dismantling the standby.
+ */
+static int nm_standby = 0;
+
+int netmgr_standby(void)
+{
+  return nm_standby;
+}
+
 static void nm_split_payload(char *p, size_t len)
 {
   nm.datalen = 0;
   nm.hlen = 0;
-  int sec = 0;                       /* 0 none, 1 dhcp, 2 hosts */
+  int sec = 0;                       /* 0 none, 1 dhcp, 2 hosts, 3 control */
   size_t i = 0;
   nm.applied = 0;
   while (i < len)
@@ -242,13 +262,28 @@ static void nm_split_payload(char *p, size_t len)
       char *line = p + i;
       if (linelen >= 4 && strncmp(line, "#===", 4) == 0)
 	{
-	  if (memmem(line, linelen, "dhcp", 4))       sec = 1;
-	  else if (memmem(line, linelen, "hosts", 5)) sec = 2;
-	  else                                        sec = 0;
+	  if (memmem(line, linelen, "dhcp", 4))         sec = 1;
+	  else if (memmem(line, linelen, "hosts", 5))   sec = 2;
+	  else if (memmem(line, linelen, "control", 7)) sec = 3;
+	  else                                          sec = 0;
 	}
       else if (linelen && sec)
 	{
 	  if (sec == 1) { nm_append(line, linelen); nm_append("\n", 1); nm.applied++; }
+	  else if (sec == 3)
+	    {
+	      /* Control directives are read here and NOT appended to the dhcp
+	         bank: they steer this process, they are not dnsmasq config. */
+	      if (linelen >= 8 && strncmp(line, "standby ", 8) == 0)
+		{
+		  int want = (line[8] == '1');
+		  if (want != nm_standby)
+		    my_syslog(MS_DHCP | LOG_WARNING,
+			      want ? _("netmgr: entering STANDBY — DHCP and DNS will not be answered")
+				   : _("netmgr: leaving standby — now serving DHCP and DNS"));
+		  nm_standby = want;
+		}
+	    }
 	  else          { nm_append_host(line, linelen); nm_append_host("\n", 1); }
 	}
       i = j + 1;

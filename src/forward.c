@@ -1499,6 +1499,14 @@ void receive_query(struct listener *listen, time_t now)
   if ((n = recvmsg(listen->fd, &msg, 0)) == -1)
     return;
   
+
+  /* STANDBY: same rule as DHCP — the recvmsg above has already consumed the
+     packet, so this cannot be hoisted earlier. Dropping rather than answering
+     REFUSED is deliberate: a resolver that gets REFUSED may cache the failure
+     or stop trying this server, whereas silence simply loses the race to the
+     active server and leaves the client's own retry logic intact. */
+  if (netmgr_standby())
+    return;
   if (n < (int)sizeof(struct dns_header) || 
       (msg.msg_flags & MSG_TRUNC) ||
       (header->hb3 & HB3_QR))
