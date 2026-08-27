@@ -23,6 +23,8 @@
 #include <netinet/tcp.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <unistd.h>
+#include <sys/wait.h>
 
 /* Single linked list of attached consumers. Small (a handful at most). */
 struct event_client {
@@ -30,11 +32,19 @@ struct event_client {
   struct event_client *next;
   char inbuf[256];         /* inbound query assembly - queries are short */
   size_t inlen;
+  int authed;              /* 1 ok, 0 still proving itself, -1 doomed */
+  time_t joined;           /* when it connected, for the auth deadline */
+  char nonce[33];          /* challenge we issued; the signed payload */
+  char principal[128];     /* identity it claims, checked against signers */
+  int sigfd;               /* temp file collecting the armored signature */
+  size_t siglen;           /* bytes taken, so a client cannot fill the disk */
+  char sigpath[64];
 };
 
 static int listen_fd = -1;
 static struct event_client *clients = NULL;
-static time_t start_time = 0;     /* set in event_socket_init */
+static time_t start_time = 0;
+static int warned_open = 0;   /* log the open-socket warning once */     /* set in event_socket_init */
 
 /* Parse "host:port" into sockaddr_in. host may be a v4 dotted-quad
    or 0.0.0.0 / *. Stored in *sa_out, port stored separately. */
@@ -225,6 +235,11 @@ void emit_event_signal(int action, struct dhcp_lease *lease, char *hostname)
   pp = &clients;
   while ((c = *pp))
     {
+      if (c->authed != 1)
+        {
+          pp = &c->next;      /* still proving itself: tell it nothing */
+          continue;
+        }
       if (try_write(c->fd, buf, len))
         pp = &c->next;
       else
@@ -416,6 +431,252 @@ static void whatif(int fd, char *args)
 }
 
 /* Read whatever a client has sent and act on complete lines. */
+/* ---- AUTH GATE -------------------------------------------------------
+ *
+ * This socket used to answer every connection with the entire lease table:
+ * send_initial_state() ran straight off accept(), before a single byte had
+ * been read. Anything able to reach the port learned every MAC, IP and
+ * hostname on the segment, with no credential of any kind.
+ *
+ * A client now proves who it is before it is told anything. We issue a
+ * random nonce; the client returns an SSHSIG over it; we hand the pair to
+ * `ssh-keygen -Y verify` against the allowed-signers file that nas3
+ * installs with the dnsmasq deploy. That file holds nas3's key alone, so
+ * the master is the only thing that can attach - every other node gets
+ * lease data by normal replication rather than by reading this socket.
+ *
+ * THE FILE IS THE GATE. With no allowed-signers file we keep the old open
+ * behaviour and say so in the log, so a gateway rebuilt before its key has
+ * arrived keeps feeding events instead of going silently deaf. The moment
+ * nas3 lands the key the gate closes by itself, with nothing to restart.
+ *
+ * Verification forks ssh-keygen and waits, which stalls the DHCP loop for
+ * a few tens of ms. That is confined to the connect path - consumers
+ * attach once and hold - so no lease traffic is delayed by it.
+ */
+#define EVENT_SIGNERS   "/etc/net-mgr/event-allowed_signers"
+#define EVENT_SIG_NS    "netmgr-event"
+#define EVENT_AUTH_SECS 20        /* prove it inside this, or be dropped */
+#define EVENT_SIG_MAX   8192      /* an SSHSIG is ~600 bytes; cap the rest */
+
+static int event_auth_enabled(void)
+{
+  return access(EVENT_SIGNERS, R_OK) == 0;
+}
+
+/* 32 hex chars from the kernel. Failure is fatal to the connection: we
+   must never fall back to a guessable challenge. */
+static int make_nonce(char *out, size_t outsz)
+{
+  unsigned char raw[16];
+  int fd, i;
+  ssize_t got;
+
+  if (outsz < sizeof(raw) * 2 + 1)
+    return 0;
+  if ((fd = open("/dev/urandom", O_RDONLY)) == -1)
+    return 0;
+  got = read(fd, raw, sizeof(raw));
+  close(fd);
+  if (got != (ssize_t)sizeof(raw))
+    return 0;
+  for (i = 0; i < (int)sizeof(raw); i++)
+    sprintf(out + i * 2, "%02x", raw[i]);
+  out[sizeof(raw) * 2] = 0;
+  return 1;
+}
+
+/* The principal reaches ssh-keygen as an argv entry, so it can never be
+   shell-interpreted, but a leading '-' would still be read as an option
+   and an odd charset makes for unreadable logs. Keep it boring. */
+static int principal_ok(const char *p)
+{
+  size_t i, n = strlen(p);
+
+  if (n == 0 || n > 120 || p[0] == '-')
+    return 0;
+  for (i = 0; i < n; i++)
+    if (!((p[i] >= 'a' && p[i] <= 'z') || (p[i] >= 'A' && p[i] <= 'Z') ||
+          (p[i] >= '0' && p[i] <= '9') ||
+          p[i] == '.' || p[i] == '_' || p[i] == '-' || p[i] == '@'))
+      return 0;
+  return 1;
+}
+
+/* ssh-keygen -Y verify reads the signed message on stdin. Exit 0 means the
+   signature is good AND the signers file vouches for that principal. */
+static int verify_sig(const char *principal, const char *sigpath,
+                      const char *nonce)
+{
+  int p[2], status;
+  pid_t pid;
+  size_t len;
+  ssize_t w;
+
+  if (pipe(p) == -1)
+    return 0;
+
+  if ((pid = fork()) == -1)
+    {
+      close(p[0]); close(p[1]);
+      return 0;
+    }
+
+  if (pid == 0)
+    {
+      int devnull = open("/dev/null", O_WRONLY);
+      close(p[1]);
+      dup2(p[0], STDIN_FILENO);
+      close(p[0]);
+      if (devnull != -1)
+        {
+          dup2(devnull, STDOUT_FILENO);
+          dup2(devnull, STDERR_FILENO);
+          close(devnull);
+        }
+      execlp("ssh-keygen", "ssh-keygen", "-Y", "verify",
+             "-f", EVENT_SIGNERS, "-I", principal,
+             "-n", EVENT_SIG_NS, "-s", sigpath, (char *)NULL);
+      _exit(127);
+    }
+
+  close(p[0]);
+  len = strlen(nonce);
+  w = write(p[1], nonce, len);
+  close(p[1]);
+  if (w != (ssize_t)len)
+    {
+      waitpid(pid, &status, 0);
+      return 0;
+    }
+  if (waitpid(pid, &status, 0) != pid)
+    return 0;
+  return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+/* Mark for reaping rather than freeing here: event_socket_check() is
+   walking the client list when this runs, so freeing now would pull the
+   ground out from under its iterator. */
+static void auth_fail(struct event_client *c, const char *why)
+{
+  my_syslog(LOG_WARNING, _("event-socket: auth refused (%s)"), why);
+  try_write(c->fd, "ERR auth\n", 9);
+  c->authed = -1;
+}
+
+static void sig_append(struct event_client *c, const char *line)
+{
+  size_t n = strlen(line);
+
+  if (c->siglen + n + 1 > EVENT_SIG_MAX)
+    {
+      auth_fail(c, "signature too large");
+      return;
+    }
+  if (write(c->sigfd, line, n) != (ssize_t)n ||
+      write(c->sigfd, "\n", 1) != 1)
+    {
+      auth_fail(c, "signature write");
+      return;
+    }
+  c->siglen += n + 1;
+}
+
+static void auth_finish(struct event_client *c)
+{
+  int ok;
+
+  close(c->sigfd);
+  c->sigfd = -1;
+  ok = verify_sig(c->principal, c->sigpath, c->nonce);
+  unlink(c->sigpath);
+  c->sigpath[0] = 0;
+
+  if (!ok)
+    {
+      auth_fail(c, "signature did not verify");
+      return;
+    }
+
+  c->authed = 1;
+  my_syslog(LOG_INFO, _("event-socket: authenticated %s"), c->principal);
+  try_write(c->fd, "OK\n", 3);
+  send_initial_state(c->fd);
+}
+
+/* One line from a client that has not proved itself yet. The armored
+   signature is streamed to a 0600 temp file a line at a time, so the
+   256-byte inbuf never limits how big a signature we can accept. */
+static void auth_line(struct event_client *c, const char *line)
+{
+  if (strncmp(line, "AUTH principal=", 15) == 0)
+    {
+      if (c->principal[0])
+        { auth_fail(c, "principal repeated"); return; }
+      if (!principal_ok(line + 15))
+        { auth_fail(c, "malformed principal"); return; }
+      strncpy(c->principal, line + 15, sizeof(c->principal) - 1);
+      c->principal[sizeof(c->principal) - 1] = 0;
+      return;
+    }
+
+  if (strcmp(line, "-----BEGIN SSH SIGNATURE-----") == 0)
+    {
+      if (!c->principal[0])
+        { auth_fail(c, "signature before principal"); return; }
+      if (c->sigfd != -1)
+        { auth_fail(c, "signature repeated"); return; }
+      strcpy(c->sigpath, "/tmp/dnsmasq-evsig-XXXXXX");
+      if ((c->sigfd = mkstemp(c->sigpath)) == -1)
+        { c->sigpath[0] = 0; auth_fail(c, "no temp file"); return; }
+      c->siglen = 0;
+      sig_append(c, line);
+      return;
+    }
+
+  if (c->sigfd != -1)
+    {
+      sig_append(c, line);
+      if (c->authed != -1 && strcmp(line, "-----END SSH SIGNATURE-----") == 0)
+        auth_finish(c);
+      return;
+    }
+
+  if (line[0])
+    auth_fail(c, "expected AUTH");
+}
+
+/* Drop doomed clients and any that sat past the auth deadline. Called
+   only from event_socket_check(), AFTER its read loop has finished. */
+static void reap_clients(void)
+{
+  struct event_client **pp = &clients, *c;
+  time_t now = time(NULL);
+
+  while ((c = *pp))
+    {
+      int drop = (c->authed == -1) ||
+                 (c->authed == 0 && now - c->joined > EVENT_AUTH_SECS);
+
+      if (!drop)
+        {
+          pp = &c->next;
+          continue;
+        }
+      if (c->authed == 0)
+        my_syslog(LOG_WARNING,
+                  _("event-socket: no valid signature within %d s, dropping client"),
+                  EVENT_AUTH_SECS);
+      if (c->sigfd != -1)
+        close(c->sigfd);
+      if (c->sigpath[0])
+        unlink(c->sigpath);
+      close(c->fd);
+      *pp = c->next;
+      free(c);
+    }
+}
+
 static void event_client_readable(struct event_client *c)
 {
   char buf[256];
@@ -430,7 +691,9 @@ static void event_client_readable(struct event_client *c)
       if (buf[i] == '\n')
 	{
 	  c->inbuf[c->inlen] = 0;
-	  if (strncmp(c->inbuf, "WHATIF", 6) == 0)
+	  if (c->authed != 1)
+	    auth_line(c, c->inbuf);
+	  else if (strncmp(c->inbuf, "WHATIF", 6) == 0)
 	    whatif(c->fd, c->inbuf + 6);
 	  else if (c->inlen)
 	    wi_reply(c->fd, "WHATIF error=unknown request\n");
@@ -460,6 +723,9 @@ void event_socket_check(void)
     if (poll_check(c->fd, POLLIN))
       event_client_readable(c);
 
+  /* Safe here and not inside the loop above: this frees list entries. */
+  reap_clients();
+
   if (!poll_check(listen_fd, POLLIN))
     return;
 
@@ -480,11 +746,45 @@ void event_socket_check(void)
     }
   c->fd = fd;
   c->inlen = 0;
+  c->authed = 1;
+  c->joined = time(NULL);
+  c->sigfd = -1;
+  c->siglen = 0;
+  c->nonce[0] = 0;
+  c->principal[0] = 0;
+  c->sigpath[0] = 0;
   c->next = clients;
   clients = c;
 
   inet_ntop(AF_INET, &sa.sin_addr, ipbuf, ADDRSTRLEN);
   my_syslog(LOG_INFO, _("event-socket: client connected from %s"), ipbuf);
+
+  if (event_auth_enabled())
+    {
+      char chal[128];
+      int len;
+
+      c->authed = 0;
+      if (!make_nonce(c->nonce, sizeof(c->nonce)))
+        {
+          my_syslog(LOG_ERR, _("event-socket: no entropy for challenge"));
+          c->authed = -1;
+          return;
+        }
+      len = snprintf(chal, sizeof(chal), "AUTH-REQUIRED nonce=%s ns=%s\n",
+                     c->nonce, EVENT_SIG_NS);
+      if (len > 0 && len < (int)sizeof(chal))
+        try_write(fd, chal, (size_t)len);
+      return;      /* it is told nothing until it has proved itself */
+    }
+
+  if (!warned_open)
+    {
+      warned_open = 1;
+      my_syslog(LOG_WARNING,
+                _("event-socket: %s absent - serving lease state to any client"),
+                EVENT_SIGNERS);
+    }
 
   send_initial_state(fd);
 }
@@ -524,6 +824,11 @@ void event_socket_dump_uptime(void)
   pp = &clients;
   while ((c = *pp))
     {
+      if (c->authed != 1)
+        {
+          pp = &c->next;      /* still proving itself: tell it nothing */
+          continue;
+        }
       if (try_write(c->fd, buf, len))
         pp = &c->next;
       else
@@ -557,7 +862,12 @@ void event_socket_dump_all(void)
       pp = &clients;
       while ((c = *pp))
         {
-          if (try_write(c->fd, buf, len))
+          if (c->authed != 1)
+        {
+          pp = &c->next;      /* still proving itself: tell it nothing */
+          continue;
+        }
+      if (try_write(c->fd, buf, len))
             pp = &c->next;
           else
             {
