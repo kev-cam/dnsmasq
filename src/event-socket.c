@@ -521,17 +521,23 @@ static int principal_ok(const char *p)
   return 1;
 }
 
-/* Copy one [section] of EVENT_ALLOWED into a temp file in the bare
-   allowed_signers format, which is all ssh-keygen understands - it would
-   reject a section header outright, so the sections are resolved here.
-   Lines before any header count as [readers], so a plain unsectioned list
-   still works and grants only read access. Returns 1 and fills pathbuf
-   when the section held at least one entry. */
+/* Copy one [section] of EVENT_ALLOWED into a temp allowed_signers file.
+   The stored format is AUTHORIZED_KEYS - the fleet convention, matching
+   allowed_chat / allowed_internet / allowed_signers - so the principal is
+   the OPTIONAL TRAILING COMMENT, not a leading field. This mirrors
+   NetMgr::Auth::_authorized_to_allowed exactly: comment becomes the
+   principal, an absent comment becomes key-<12 chars of the key>, spaces
+   in it become underscores, and hostwild() lowercases the user part and
+   wildcards the host so one key works from whatever host presents it -
+   what stops an impostor is possession of the private key, not the label.
+   ssh-keygen would reject a section header, so headers are resolved here
+   and lines before any header count as [readers]. Returns 1 and fills
+   pathbuf when the section held at least one usable key. */
 static int section_to_file(const char *want, char *pathbuf, size_t pathsz)
 {
   FILE *in, *out;
   int fd, n = 0, in_section;
-  char line[512];
+  char line[1024];
 
   if (pathsz < 32 || !(in = fopen(EVENT_ALLOWED, "r")))
     return 0;
@@ -553,7 +559,9 @@ static int section_to_file(const char *want, char *pathbuf, size_t pathsz)
   in_section = (strcmp(want, EVENT_SEC_READERS) == 0);
   while (fgets(line, sizeof(line), in))
     {
-      char *s = line;
+      char *s = line, *kt, *kd, *cm, *p;
+      char principal[160];
+      size_t i;
 
       while (*s == ' ' || *s == '\t')
         s++;
@@ -567,11 +575,63 @@ static int section_to_file(const char *want, char *pathbuf, size_t pathsz)
             }
           continue;
         }
-      if (*s == '#' || *s == '\n' || *s == '\r' || *s == 0)
+      if (*s == '#' || *s == '\n' || *s == '\r' || *s == 0 || !in_section)
         continue;
-      if (!in_section)
+      for (p = s + strlen(s); p > s && (p[-1] == '\n' || p[-1] == '\r'); p--)
+        p[-1] = 0;
+
+      /* Find the key type, stepping over any leading options group. */
+      kt = s;
+      for (;;)
+        {
+          if (strncmp(kt, "ssh-", 4) == 0 || strncmp(kt, "ecdsa-", 6) == 0 ||
+              strncmp(kt, "sk-", 3) == 0)
+            break;
+          if (!(kt = strpbrk(kt, " \t")))
+            break;
+          while (*kt == ' ' || *kt == '\t')
+            kt++;
+          if (*kt == 0)
+            {
+              kt = NULL;
+              break;
+            }
+        }
+      if (!kt)
+        continue;                      /* no key on this line */
+
+      if (!(kd = strpbrk(kt, " \t")))
         continue;
-      fputs(line, out);
+      *kd++ = 0;
+      while (*kd == ' ' || *kd == '\t')
+        kd++;
+      cm = strpbrk(kd, " \t");
+      if (cm)
+        {
+          *cm++ = 0;
+          while (*cm == ' ' || *cm == '\t')
+            cm++;
+        }
+
+      if (cm && *cm)
+        {
+          snprintf(principal, sizeof(principal), "%s", cm);
+          for (i = 0; principal[i]; i++)          /* spaces -> underscores */
+            if (principal[i] == ' ' || principal[i] == '\t')
+              principal[i] = '_';
+        }
+      else
+        snprintf(principal, sizeof(principal), "key-%.12s", kd);
+
+      /* hostwild: user@host -> user@*, and a bare name gains @* too. */
+      if ((p = strchr(principal, '@')))
+        *p = 0;
+      for (i = 0; principal[i]; i++)
+        if (principal[i] >= 'A' && principal[i] <= 'Z')
+          principal[i] = (char)(principal[i] - 'A' + 'a');
+
+      fprintf(out, "%s@* namespaces=\"%s\" %s %s\n",
+              principal, EVENT_SIG_NS, kt, kd);
       n++;
     }
   fclose(in);
