@@ -51,6 +51,7 @@
 #define NM_BACKOFF_MIN 2
 #define NM_BACKOFF_MAX 120
 #define NM_SETTLE      2        /* seconds to coalesce a burst of doorbells */
+#define NM_LOAD_TIMEOUT 30     /* seconds to wait for a POLL reply */
 /* Defined once: this literal has been mangled by scripted edits more than once,
    and three copies of it is three chances to get an embedded newline wrong. */
 #define NM_POLL_CMD   "POLL dnsmasq-conf\n"
@@ -89,6 +90,7 @@ static void nm_close(int backoff)
 {
   if (nm.fd != -1) { close(nm.fd); nm.fd = -1; }
   nm.linelen = 0;
+  nm.load_deadline = 0;
   nm.datalen = 0;
   nm.hlen = 0;
   if (backoff)
@@ -321,6 +323,13 @@ static void nm_line(char *line)
       if (strncmp(line, "OK", 2) != 0) return;      /* ignore anything else */
       if (!nm_send("POLL dnsmasq-conf\n")) { nm_close(1); return; }
       nm.state = NM_LOADING;
+      /* Arm the deadline HERE too. Without this the reconnect path
+         inherited whatever deadline the previous connection left
+         behind - a time already past - so the timeout fired before
+         the reply could arrive, closing the connection and retrying
+         forever. A cold start escaped it only because the field is
+         still 0 then, and the check is guarded on non-zero. */
+      nm.load_deadline = dnsmasq_time() + NM_LOAD_TIMEOUT;
       return;
     }
 
@@ -519,7 +528,7 @@ void netmgr_check(time_t now)
     {
       if (!nm_send(NM_POLL_CMD)) { nm_close(1); return; }
       nm.state = NM_LOADING;
-      nm.load_deadline = now + 30;
+      nm.load_deadline = now + NM_LOAD_TIMEOUT;
       return;
     }
 
@@ -532,7 +541,7 @@ void netmgr_check(time_t now)
       nm.dirty = 0;
       if (!nm_send(NM_POLL_CMD)) { nm_close(1); return; }
       nm.state = NM_LOADING;
-      nm.load_deadline = now + 30;
+      nm.load_deadline = now + NM_LOAD_TIMEOUT;
     }
 }
 
