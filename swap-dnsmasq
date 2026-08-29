@@ -12,6 +12,22 @@
 
 set -eu
 
+# Where the event socket listens. 0.0.0.0 was the old default and on a gateway
+# that puts the DHCP/DNS control channel on the WAN, reachable from the
+# Internet. Bind a private address instead: nas3 still reaches it across the
+# LAN, which is the only thing that needs to. NETMGR_EVENT_LISTEN overrides.
+# The fallback is loopback rather than every interface - if no private address
+# can be found, failing closed is the safer wrong answer.
+if [ -z "${NETMGR_EVENT_LISTEN:-}" ]; then
+    _priv=$(ip -4 -o addr show scope global 2>/dev/null \
+            | awk '{print $4}' | cut -d/ -f1 \
+            | grep -E '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' \
+            | head -1)
+    EVENT_LISTEN="${_priv:-127.0.0.1}:7533"
+else
+    EVENT_LISTEN="$NETMGR_EVENT_LISTEN"
+fi
+
 LOCAL_BIN=/usr/local/sbin/dnsmasq
 SYSTEM_BIN=/usr/sbin/dnsmasq
 LOCAL_UNIT=dnsmasq-local
@@ -82,7 +98,7 @@ case "$cmd" in
         --unit="$LOCAL_UNIT" \
         --description="patched dnsmasq from /usr/local (swap-dnsmasq)" \
         --collect \
-        "$LOCAL_BIN" --keep-in-foreground --event-listen=0.0.0.0:7533 "$@"
+        "$LOCAL_BIN" --keep-in-foreground --event-listen="$EVENT_LISTEN" "$@"
     echo "started $LOCAL_UNIT — event-socket at 0.0.0.0:7533"
     ;;
 

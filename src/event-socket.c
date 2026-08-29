@@ -482,6 +482,29 @@ static int event_auth_enabled(void)
   return access(EVENT_ALLOWED, R_OK) == 0;
 }
 
+/* Loopback, RFC1918 or link-local.
+
+   This socket carries the whole DHCP view of the network - every MAC,
+   hostname and address - and an updater can write to it. Authentication is
+   contingent on EVENT_ALLOWED existing, so a rebuilt gateway, a deploy that
+   did not land, or a moved file silently turns the permissive default back
+   on. That default is defensible on a local network; it is not defensible on
+   a box whose listener reaches the Internet, where the failure mode hands the
+   internal map to anyone who connects. Refusing unauthenticated clients from
+   off-network addresses makes the exposed case impossible regardless of how
+   the socket was bound or who deployed it. */
+static int addr_is_local_scope(struct in_addr *in)
+{
+  unsigned long a = ntohl(in->s_addr);
+
+  if ((a & 0xff000000UL) == 0x7f000000UL) return 1;   /* 127.0.0.0/8    */
+  if ((a & 0xff000000UL) == 0x0a000000UL) return 1;   /* 10.0.0.0/8     */
+  if ((a & 0xfff00000UL) == 0xac100000UL) return 1;   /* 172.16.0.0/12  */
+  if ((a & 0xffff0000UL) == 0xc0a80000UL) return 1;   /* 192.168.0.0/16 */
+  if ((a & 0xffff0000UL) == 0xa9fe0000UL) return 1;   /* 169.254.0.0/16 */
+  return 0;
+}
+
 /* 32 hex chars from the kernel. Failure is fatal to the connection: we
    must never fall back to a guessable challenge. */
 static int make_nonce(char *out, size_t outsz)
@@ -944,11 +967,24 @@ void event_socket_check(void)
       return;      /* it is told nothing until it has proved itself */
     }
 
+  /* No allowlist, so nothing can be proved about this client. Serve it only
+     if it is on the local network; -1 marks it doomed for the reaper. */
+  if (!addr_is_local_scope(&sa.sin_addr))
+    {
+      my_syslog(LOG_WARNING,
+                _("event-socket: refusing %s - %s absent, so unauthenticated "
+                  "clients are served on the local network only"),
+                ipbuf, EVENT_ALLOWED);
+      c->authed = -1;
+      return;
+    }
+
   if (!warned_open)
     {
       warned_open = 1;
       my_syslog(LOG_WARNING,
-                _("event-socket: %s absent - serving lease state to any client"),
+                _("event-socket: %s absent - serving lease state to any client "
+                  "on the local network"),
                 EVENT_ALLOWED);
     }
 
