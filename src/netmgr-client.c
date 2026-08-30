@@ -52,6 +52,8 @@
 #define NM_BACKOFF_MAX 120
 #define NM_SETTLE      2        /* seconds to coalesce a burst of doorbells */
 #define NM_LOAD_TIMEOUT 30     /* seconds to wait for a POLL reply */
+#define NM_READY_GRACE  45     /* seconds to wait for a FIRST payload before
+                                  serving from the on-disk generation anyway */
 /* Defined once: this literal has been mangled by scripted edits more than once,
    and three copies of it is three chances to get an embedded newline wrong. */
 #define NM_POLL_CMD   "POLL dnsmasq-conf\n"
@@ -243,14 +245,93 @@ static size_t nm_b64(const char *in, size_t inlen, char *out)
  * operator cannot resolve without dismantling the standby.
  */
 static int nm_standby = 0;
+static int nm_ready   = 0;   /* a full payload has been applied at least once */
+static time_t nm_started = 0;
 
 int netmgr_standby(void)
 {
   return nm_standby;
 }
 
+/* Should this server stay silent?
+
+   Two reasons, and the second is the one that used to be missed. A standby
+   must not answer - that is nm_standby. But a server that has not yet been
+   handed its configuration must not answer either: between exec and the first
+   payload it knows nothing about reservations, names, or whether it is even
+   supposed to be the active server, and answering in that window is how a
+   standby briefly competed with the live one after every restart.
+
+   Silence is not unbounded. If net-mgr cannot be reached at all, refusing to
+   serve would turn a management outage into a network outage, so after
+   NM_READY_GRACE we start answering from the on-disk generation - which
+   net-mgr itself wrote - and say so loudly. A build with no --netmgr
+   configured is stock dnsmasq and is never gated. */
+int netmgr_silent(void)
+{
+  static int warned_grace = 0;
+
+  if (nm.state == NM_OFF || !daemon->netmgr_spec)
+    return 0;                      /* not under net-mgr control at all */
+  if (nm_standby)
+    return 1;
+  if (nm_ready)
+    return 0;
+
+  if (nm_started && dnsmasq_time() - nm_started >= NM_READY_GRACE)
+    {
+      if (!warned_grace)
+        {
+          warned_grace = 1;
+          my_syslog(MS_DHCP | LOG_WARNING,
+                    _("netmgr: no configuration after %d seconds - serving the "
+                      "on-disk generation; reservations may be stale"),
+                    NM_READY_GRACE);
+        }
+      return 0;
+    }
+  return 1;
+}
+
+/* Apply the control directives only.
+
+   Run before the data sections so that a standby stops answering BEFORE it is
+   handed anything, no matter where the server placed the control block. The
+   server does emit it first, but a client that depends on the order of a
+   remote peer's output is one reordering away from serving as an active
+   server for the length of a payload. */
+static void nm_scan_control(char *p, size_t len)
+{
+  int in_control = 0;
+  size_t i = 0;
+
+  while (i < len)
+    {
+      size_t j = i;
+      while (j < len && p[j] != '\n') j++;
+      size_t linelen = j - i;
+      char *line = p + i;
+
+      if (linelen >= 4 && strncmp(line, "#===", 4) == 0)
+        in_control = (memmem(line, linelen, "control", 7) != NULL);
+      else if (linelen && in_control
+               && linelen >= 8 && strncmp(line, "standby ", 8) == 0)
+        {
+          int want = (line[8] == '1');
+          if (want != nm_standby)
+            my_syslog(MS_DHCP | LOG_WARNING,
+                      want ? _("netmgr: entering STANDBY — DHCP and DNS will not be answered")
+                           : _("netmgr: leaving standby — now serving DHCP and DNS"));
+          nm_standby = want;
+        }
+      i = j + 1;
+    }
+}
+
 static void nm_split_payload(char *p, size_t len)
 {
+  nm_scan_control(p, len);
+
   nm.datalen = 0;
   nm.hlen = 0;
   int sec = 0;                       /* 0 none, 1 dhcp, 2 hosts, 3 control */
@@ -274,17 +355,9 @@ static void nm_split_payload(char *p, size_t len)
 	  if (sec == 1) { nm_append(line, linelen); nm_append("\n", 1); nm.applied++; }
 	  else if (sec == 3)
 	    {
-	      /* Control directives are read here and NOT appended to the dhcp
-	         bank: they steer this process, they are not dnsmasq config. */
-	      if (linelen >= 8 && strncmp(line, "standby ", 8) == 0)
-		{
-		  int want = (line[8] == '1');
-		  if (want != nm_standby)
-		    my_syslog(MS_DHCP | LOG_WARNING,
-			      want ? _("netmgr: entering STANDBY — DHCP and DNS will not be answered")
-				   : _("netmgr: leaving standby — now serving DHCP and DNS"));
-		  nm_standby = want;
-		}
+	      /* Already applied by nm_scan_control() before this walk started,
+	         and deliberately NOT appended to the dhcp bank: control
+	         directives steer this process, they are not dnsmasq config. */
 	    }
 	  else          { nm_append_host(line, linelen); nm_append_host("\n", 1); }
 	}
@@ -358,6 +431,7 @@ static void nm_line(char *line)
 	{
 	  nm_split_payload(dec, dlen);
 	  nm_apply();
+	  nm_ready = 1;      /* configuration is complete: answering is allowed */
 	}
       free(dec);
       nm.state = NM_IDLE;
@@ -440,6 +514,7 @@ static void nm_connect(void)
 
 void netmgr_init(void)
 {
+  nm_started = dnsmasq_time();
   nm.fd = -1;
   nm.backoff = NM_BACKOFF_MIN;
   if (!daemon->netmgr_spec) { nm.state = NM_OFF; return; }

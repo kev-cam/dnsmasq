@@ -177,14 +177,14 @@ void dhcp_packet(time_t now, int pxe_fd)
     return;
   
 
-  /* STANDBY: consume the packet, then ignore it. The read above is deliberate
+  /* SILENT (standby, or configuration not yet loaded): consume the packet, then ignore it. The read above is deliberate
      and must not be skipped — returning before it would leave the socket
      readable and spin the event loop. Silence is the correct answer for DHCP:
      there is no "refuse" that does not actively harm, since a DHCPNAK would
      tell a client its address is invalid when the ACTIVE server may be about
      to grant exactly that address. Saying nothing lets the active server win
      the race, which is the whole point of a standby. */
-  if (netmgr_standby())
+  if (netmgr_silent())
     return;
 #ifdef HAVE_DUMPFILE
   dump_packet_udp(DUMP_DHCP, (void *)daemon->dhcp_packet.iov_base, sz, (union mysockaddr *)&dest, NULL, fd);

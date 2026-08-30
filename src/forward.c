@@ -1500,12 +1500,12 @@ void receive_query(struct listener *listen, time_t now)
     return;
   
 
-  /* STANDBY: same rule as DHCP — the recvmsg above has already consumed the
+  /* SILENT (standby, or configuration not yet loaded): same rule as DHCP — the recvmsg above has already consumed the
      packet, so this cannot be hoisted earlier. Dropping rather than answering
      REFUSED is deliberate: a resolver that gets REFUSED may cache the failure
      or stop trying this server, whereas silence simply loses the race to the
      active server and leaves the client's own retry logic intact. */
-  if (netmgr_standby())
+  if (netmgr_silent())
     return;
   if (n < (int)sizeof(struct dns_header) || 
       (msg.msg_flags & MSG_TRUNC) ||
@@ -2095,13 +2095,13 @@ unsigned char *tcp_request(int confd, time_t now,
   if (!packet || getpeername(confd, (struct sockaddr *)&peer_addr, &peer_len) == -1)
     return packet;
 
-  /* STANDBY: silent on TCP too. receive_query() already drops UDP queries,
+  /* SILENT (standby, or configuration not yet loaded): on TCP too. receive_query() already drops UDP queries,
      but without the same check here a dormant server still answers anything
      that arrives over TCP - a truncated-response retry, a large or DNSSEC
      answer, a zone transfer - so two servers are back on the wire and the
      dormancy is only half real. Returning packet is the established exit
      for this function; the caller frees it and closes the connection. */
-  if (netmgr_standby())
+  if (netmgr_silent())
     return packet;
 
 #ifdef HAVE_CONNTRACK

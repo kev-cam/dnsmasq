@@ -1466,6 +1466,7 @@ void netmgr_check(time_t now);
 int netmgr_next_wakeup_ms(void);
 char *netmgr_bank_data(size_t *len);
 int netmgr_standby(void);
+int netmgr_silent(void);
 char *netmgr_hosts_data(size_t *len);
 unsigned int alloc_hosts_index(void);
 unsigned int netmgr_hosts_index(void);
