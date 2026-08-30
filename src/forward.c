@@ -2095,6 +2095,15 @@ unsigned char *tcp_request(int confd, time_t now,
   if (!packet || getpeername(confd, (struct sockaddr *)&peer_addr, &peer_len) == -1)
     return packet;
 
+  /* STANDBY: silent on TCP too. receive_query() already drops UDP queries,
+     but without the same check here a dormant server still answers anything
+     that arrives over TCP - a truncated-response retry, a large or DNSSEC
+     answer, a zone transfer - so two servers are back on the wire and the
+     dormancy is only half real. Returning packet is the established exit
+     for this function; the caller frees it and closes the connection. */
+  if (netmgr_standby())
+    return packet;
+
 #ifdef HAVE_CONNTRACK
   /* Get connection mark of incoming query to set on outgoing connections. */
   if (option_bool(OPT_CONNTRACK) || option_bool(OPT_CMARK_ALST_EN))
