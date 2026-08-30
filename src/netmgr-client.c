@@ -54,6 +54,8 @@
 #define NM_LOAD_TIMEOUT 30     /* seconds to wait for a POLL reply */
 #define NM_READY_GRACE  45     /* seconds to wait for a FIRST payload before
                                   serving from the on-disk generation anyway */
+#define NM_ROLE_FILE  "/etc/net-mgr/standby"   /* present = this node is a standby */
+#define NM_CONF_FILE  "/etc/net-mgr/dnsmasq.conf" /* present = net-mgr configured us */
 /* Defined once: this literal has been mangled by scripted edits more than once,
    and three copies of it is three chances to get an embedded newline wrong. */
 #define NM_POLL_CMD   "POLL dnsmasq-conf\n"
@@ -246,6 +248,7 @@ static size_t nm_b64(const char *in, size_t inlen, char *out)
  */
 static int nm_standby = 0;
 static int nm_ready   = 0;   /* a full payload has been applied at least once */
+static int nm_role_known = 0; /* role settled from local config, not from upstream */
 static time_t nm_started = 0;
 
 int netmgr_standby(void)
@@ -262,11 +265,13 @@ int netmgr_standby(void)
    supposed to be the active server, and answering in that window is how a
    standby briefly competed with the live one after every restart.
 
-   Silence is not unbounded. If net-mgr cannot be reached at all, refusing to
-   serve would turn a management outage into a network outage, so after
-   NM_READY_GRACE we start answering from the on-disk generation - which
-   net-mgr itself wrote - and say so loudly. A build with no --netmgr
-   configured is stock dnsmasq and is never gated. */
+   Silence is not unbounded, and normally it does not happen at all: a node
+   whose role is settled from local config (see netmgr_init) serves or stays
+   quiet from the moment it starts, with no dependence on upstream. Only a node
+   net-mgr has never configured has to wait, and even then just for
+   NM_READY_GRACE, after which it serves the on-disk generation and says so
+   loudly - a management outage must not become a network outage. A build with
+   no --netmgr configured is stock dnsmasq and is never gated. */
 int netmgr_silent(void)
 {
   static int warned_grace = 0;
@@ -275,7 +280,7 @@ int netmgr_silent(void)
     return 0;                      /* not under net-mgr control at all */
   if (nm_standby)
     return 1;
-  if (nm_ready)
+  if (nm_ready || nm_role_known)
     return 0;
 
   if (nm_started && dnsmasq_time() - nm_started >= NM_READY_GRACE)
@@ -515,6 +520,32 @@ static void nm_connect(void)
 void netmgr_init(void)
 {
   nm_started = dnsmasq_time();
+
+  /* Settle our role from LOCAL state before anything is served.
+
+     The role cannot come from upstream: a standby that has to be told it is a
+     standby spends every restart answering, and if net-mgr is unreachable it
+     never finds out at all - it would fall back to serving a pool that
+     overlaps the active server's. Equally, an active server must not wait for
+     upstream to be allowed to serve its own on-disk configuration; losing the
+     management plane must not take DHCP and DNS down with it.
+
+     So: the marker file says standby, its absence on a net-mgr-configured node
+     says active, and a node net-mgr has never touched stays unknown and falls
+     back to waiting for a payload. net-mgr maintains the marker; a live
+     payload can still change the role afterwards. */
+  if (access(NM_ROLE_FILE, R_OK) == 0)
+    {
+      nm_standby = 1;
+      nm_role_known = 1;
+      my_syslog(MS_DHCP | LOG_INFO,
+                _("netmgr: %s present - starting in STANDBY, not answering"),
+                NM_ROLE_FILE);
+    }
+  else if (access(NM_CONF_FILE, R_OK) == 0)
+    {
+      nm_role_known = 1;      /* configured by net-mgr and not marked standby */
+    }
   nm.fd = -1;
   nm.backoff = NM_BACKOFF_MIN;
   if (!daemon->netmgr_spec) { nm.state = NM_OFF; return; }
