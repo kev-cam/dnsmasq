@@ -99,7 +99,7 @@ case "$cmd" in
         --description="patched dnsmasq from /usr/local (swap-dnsmasq)" \
         --collect \
         "$LOCAL_BIN" --keep-in-foreground --event-listen="$EVENT_LISTEN" "$@"
-    echo "started $LOCAL_UNIT — event-socket at 0.0.0.0:7533"
+    echo "started $LOCAL_UNIT — event-socket at $EVENT_LISTEN"
     ;;
 
   system)
