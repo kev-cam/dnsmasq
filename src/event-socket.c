@@ -255,11 +255,33 @@ void emit_event_signal(int action, struct dhcp_lease *lease, char *hostname)
 /* Walk the current lease table and send a "have" line for each entry
    to one specific fd. Used right after accept() so a fresh consumer
    has full state without waiting for the next renewal. */
+/* Defined further down, but the VERSION banner below needs it. */
+static int event_auth_enabled(void);
+
 static void send_initial_state(int fd)
 {
   char buf[512];
   size_t len;
   struct dhcp_lease *l;
+
+  /* Say WHICH dnsmasq this is, before any state. A consumer otherwise cannot
+     tell one build from another over this socket: that the socket exists at all
+     proves only that some build with --event-listen is running, and the distro
+     package has no such option, so "patched" was the entire resolution
+     available. Which patched build was guesswork from syslog phrasing.
+
+     Emitted from send_initial_state() because BOTH accept paths funnel through
+     it - the post-signature one and the unauthenticated-local one - so there is
+     one place to keep correct rather than two.
+
+     Old consumers ignore this safely: net-mgr's event reader drops any line that
+     is not "EVENT ...", so an unknown leading token is a no-op there. proto= is
+     for the consumer to branch on if this line ever grows fields. */
+  len = (size_t)snprintf(buf, sizeof(buf),
+                         "VERSION dnsmasq=%s proto=1 auth=%d\n",
+                         VERSION, event_auth_enabled() ? 1 : 0);
+  if (len > 0 && len < sizeof(buf) && !try_write(fd, buf, len))
+    return;                     /* client gone before we said anything */
 
   for (l = lease_get_head(); l; l = l->next)
     {
