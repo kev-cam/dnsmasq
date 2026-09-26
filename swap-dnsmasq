@@ -285,6 +285,17 @@ case "$cmd" in
     # a dnsmasq.conf change, since dnsmasq re-reads hosts and resolv-file on
     # SIGHUP but never its configuration.
     systemctl stop "$LOCAL_UNIT.service" 2>/dev/null || true
+    # And WAIT for systemd to forget the unit. 'stop' returns before a
+    # --collect transient unit is garbage-collected, so systemd-run can still
+    # lose the race with "Unit dnsmasq-local.service already exists" - which is
+    # a hard failure that leaves the swap half-done. Poll LoadState instead of
+    # sleeping a guessed interval.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        st=$(systemctl show -p LoadState --value "$LOCAL_UNIT.service" 2>/dev/null || echo not-found)
+        [ "$st" = not-found ] && break
+        systemctl reset-failed "$LOCAL_UNIT.service" 2>/dev/null || true
+        sleep 0.3
+    done
     # Wait for the pid file to be released (dnsmasq holds it until exit).
     for _ in 1 2 3 4 5; do
         [ -e /run/dnsmasq/dnsmasq.pid ] || break
