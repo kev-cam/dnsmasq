@@ -9,6 +9,14 @@
 #   sudo ./swap-dnsmasq local     # stop system service, run /usr/local one
 #   sudo ./swap-dnsmasq system    # stop /usr/local one, restart system
 #   sudo ./swap-dnsmasq status    # which is running, plus binary versions
+#
+# 'local' also points systemd-resolved at this dnsmasq, and 'system' puts
+# resolved back. Rationale: /etc/resolv.conf is a symlink into
+# /run/systemd/resolve/ which resolved regenerates, so editing it to give
+# dnsmasq upstreams never sticks. Inverting the chain instead - resolved as a
+# stub that forwards to dnsmasq - leaves resolv.conf alone entirely and gives
+# the whole box one cache that can see the fleet's own zone.
+# Set NETMGR_WIRE_RESOLVED=0 to skip that part and only swap binaries.
 
 set -eu
 
@@ -32,6 +40,16 @@ LOCAL_BIN=/usr/local/sbin/dnsmasq
 SYSTEM_BIN=/usr/sbin/dnsmasq
 LOCAL_UNIT=dnsmasq-local
 
+# A drop-in, never an edit of resolved.conf: undoing it is a delete, so 'system'
+# cannot leave a half-restored resolver behind. DNSStubListener is deliberately
+# NOT set here - /etc/resolv.conf points at 127.0.0.53, so the stub has to stay.
+RESOLVED_DROPIN=/etc/systemd/resolved.conf.d/50-netmgr-dnsmasq.conf
+# Which links we cleared a '~.' from, so 'system' can put them back. Runtime
+# state in /run, because the clearing itself is runtime-only (DHCP restores the
+# '~.' on the next lease anyway).
+RESOLVED_STATE=/run/swap-dnsmasq/cleared-domains
+WIRE_RESOLVED="${NETMGR_WIRE_RESOLVED:-1}"
+
 # Read the running dnsmasq's actual argv from /proc so we run the
 # local build with the same flags. We can't trust dnsmasq.service's
 # ExecStart= because Debian/Ubuntu wrap dnsmasq behind /etc/init.d
@@ -47,9 +65,159 @@ running_argv() {
             /usr/sbin/dnsmasq*) echo "$args"; return ;;
         esac
     done
+    # already-local: no packaged instance is running because OURS is. Re-running
+    # 'local' is a legitimate restart (net-mgr drives it that way), and falling
+    # through to the hardcoded default would silently drop the real argv - the
+    # DNSSEC --trust-anchor= pair, --dhcp-reply-delay, whatever the host had. So
+    # read our own cmdline instead and strip the two flags this script adds, or
+    # they would be passed twice.
+    for pid in $(pgrep -f "^$LOCAL_BIN" 2>/dev/null); do
+        args=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+        case "$args" in
+            "$LOCAL_BIN"*)
+                # Re-head it as the system binary so the caller's "drop the
+                # first token" step still means the same thing.
+                set -- $args
+                shift
+                filtered=
+                for a in "$@"; do
+                    case "$a" in
+                        --keep-in-foreground|--event-listen=*) ;;
+                        *) filtered="$filtered $a" ;;
+                    esac
+                done
+                echo "$SYSTEM_BIN$filtered"
+                return ;;
+        esac
+    done
     echo "/usr/sbin/dnsmasq -x /run/dnsmasq/dnsmasq.pid"\
          "-u dnsmasq -7 /etc/dnsmasq.d,.dpkg-dist,.dpkg-old,.dpkg-new"\
          "--local-service"
+}
+
+# Is systemd-resolved actually the resolver here? Several nodes do not run it,
+# and on those this whole section must be a no-op rather than an error.
+resolved_in_use() {
+    [ "$WIRE_RESOLVED" = 1 ] || return 1
+    command -v resolvectl >/dev/null 2>&1 || return 1
+    [ "$(systemctl is-active systemd-resolved 2>/dev/null)" = active ] || return 1
+    return 0
+}
+
+# Links holding the '~.' catch-all. Such a link beats the Global scope for EVERY
+# name, so leaving one in place means resolved never reaches the DNS= we set and
+# the wiring silently does nothing. Seen live on gateway3: the Yeacomm LTE link
+# held '~.' and every query went to a dead LTE resolver while the configured
+# Comcast pair sat unused in Global.
+resolved_catchall_links() {
+    resolvectl domain 2>/dev/null |
+      awk '/^Link/ && /~\./ { name=$3; gsub(/[():]/, "", name); print name }'
+}
+
+# A link's FULL domain list, tab-separated from its name. A link normally
+# carries more than the catch-all - 'Link 3 (wlp0s12f0): ~. hsd1.ca.comcast.net'
+# is the ordinary DHCP-fed shape - so putting back a bare '~.' later would
+# silently drop the search domain. Record everything, restore exactly that.
+resolved_link_domains() {
+    resolvectl domain 2>/dev/null |
+      awk '/^Link/ && /~\./ {
+             name = $3; gsub(/[():]/, "", name);
+             doms = "";
+             for (i = 4; i <= NF; i++) doms = doms (doms == "" ? "" : " ") $i;
+             print name "\t" doms
+           }'
+}
+
+# THE LOOP GUARD. dnsmasq's default resolv-file is /etc/resolv.conf, which on a
+# resolved box resolves to the stub - so a freshly started dnsmasq's only
+# upstream is 127.0.0.53, i.e. resolved. Pointing resolved back at dnsmasq then
+# builds dnsmasq -> resolved -> dnsmasq and every query hangs. Only wire once
+# dnsmasq holds an upstream that is not the stub (the net-mgr resolvers feed, or
+# no-resolv + server= lines). Failing closed here leaves resolved untouched,
+# which is the safe wrong answer.
+dnsmasq_has_real_upstream() {
+    command -v dig >/dev/null 2>&1 || return 1
+    local out
+    out=$(dig +short +time=2 +tries=1 chaos txt servers.bind @127.0.0.1 2>/dev/null) || return 1
+    [ -n "$out" ] || return 1
+    # Every upstream is the stub or ourselves => nothing real to forward to.
+    printf '%s\n' "$out" | tr -d '"' | tr ' ' '\n' |
+      grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+#' |
+      grep -qvE '^(127\.0\.0\.53|127\.0\.0\.1)#'
+}
+
+resolved_wire() {
+    resolved_in_use || { echo "resolved: not in use here — left alone"; return 0; }
+
+    if ! dnsmasq_has_real_upstream; then
+        echo "resolved: NOT wired — dnsmasq has no upstream except the resolved stub." >&2
+        echo "  Wiring now would loop (dnsmasq -> resolved -> dnsmasq) and hang every" >&2
+        echo "  query. Give dnsmasq real resolvers first (net-mgr resolvers feed, or" >&2
+        echo "  no-resolv + server= lines), then re-run: $0 local" >&2
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$RESOLVED_DROPIN")" "$(dirname "$RESOLVED_STATE")"
+    cat > "$RESOLVED_DROPIN" <<EOF
+# Written by swap-dnsmasq. Points systemd-resolved at the patched dnsmasq on
+# this host so the whole box resolves through one cache and can see the fleet's
+# own zone, instead of resolv.conf being fought over.
+#
+# resolv.conf is left alone on purpose: it is a symlink into
+# /run/systemd/resolve/ that resolved regenerates. DNSStubListener is NOT set
+# here - the symlink points at 127.0.0.53, so the stub must keep listening.
+#
+# Remove this file (or run 'swap-dnsmasq system') and restart
+# systemd-resolved to undo.
+[Resolve]
+DNS=127.0.0.1
+Domains=~.
+EOF
+
+    # Clear any link-level '~.' at runtime, recording what we touched. Runtime
+    # only: making it persistent means editing a NetworkManager profile, which
+    # is a different subsystem and not this script's business to mutate - the
+    # command is printed instead.
+    : > "$RESOLVED_STATE"
+    local cleared=0 l doms
+    while IFS=$'\t' read -r l doms; do
+        [ -n "$l" ] || continue
+        resolvectl domain "$l" "" 2>/dev/null || continue
+        printf '%s\t%s\n' "$l" "$doms" >> "$RESOLVED_STATE"
+        cleared=$((cleared + 1))
+        echo "resolved: cleared domains '$doms' from link $l (runtime only)"
+        echo "  to persist: nmcli con mod <profile-on-$l> ipv4.ignore-auto-dns yes ipv6.ignore-auto-dns yes"
+    done <<EOF
+$(resolved_link_domains)
+EOF
+    [ "$cleared" = 0 ] || true
+
+    systemctl restart systemd-resolved 2>/dev/null || true
+    echo "resolved: now forwarding to 127.0.0.1 (this dnsmasq) via $RESOLVED_DROPIN"
+}
+
+resolved_unwire() {
+    resolved_in_use || return 0
+    local changed=0
+    if [ -e "$RESOLVED_DROPIN" ]; then
+        rm -f "$RESOLVED_DROPIN"
+        changed=1
+        echo "resolved: removed $RESOLVED_DROPIN"
+    fi
+    # Put back any '~.' we cleared, so leaving the patched build restores the
+    # resolver layout we found rather than a third state nobody chose.
+    if [ -s "$RESOLVED_STATE" ]; then
+        local l doms
+        while IFS=$'\t' read -r l doms; do
+            [ -n "$l" ] || continue
+            # shellcheck disable=SC2086 -- $doms is a deliberate word list
+            resolvectl domain "$l" $doms 2>/dev/null \
+              && echo "resolved: restored domains '$doms' on link $l" || true
+        done < "$RESOLVED_STATE"
+        rm -f "$RESOLVED_STATE"
+        changed=1
+    fi
+    [ "$changed" = 0 ] || systemctl restart systemd-resolved 2>/dev/null || true
 }
 
 cmd="${1:-status}"
@@ -86,6 +254,12 @@ case "$cmd" in
         set -- $filtered
     fi
     systemctl stop dnsmasq.service 2>/dev/null || true
+    # Also stop a PREVIOUS instance of our own transient unit. Without this a
+    # re-run dies on "unit dnsmasq-local.service already exists", which makes
+    # the swap unusable as a restart - and restarting is the only way to pick up
+    # a dnsmasq.conf change, since dnsmasq re-reads hosts and resolv-file on
+    # SIGHUP but never its configuration.
+    systemctl stop "$LOCAL_UNIT.service" 2>/dev/null || true
     # Wait for the pid file to be released (dnsmasq holds it until exit).
     for _ in 1 2 3 4 5; do
         [ -e /run/dnsmasq/dnsmasq.pid ] || break
@@ -100,10 +274,18 @@ case "$cmd" in
         --collect \
         "$LOCAL_BIN" --keep-in-foreground --event-listen="$EVENT_LISTEN" "$@"
     echo "started $LOCAL_UNIT — event-socket at $EVENT_LISTEN"
+    # Give the new instance a moment to bind and load its servers before the
+    # loop guard interrogates it, or a healthy setup looks unwired.
+    sleep 2
+    resolved_wire
     ;;
 
   system)
     [ "$(id -u)" -eq 0 ] || { echo "must be root" >&2; exit 1; }
+    # Unwire BEFORE the patched instance goes away: while resolved still points
+    # at 127.0.0.1, a dnsmasq-shaped hole there is a resolution outage for the
+    # whole box, including anything this script might want to look up.
+    resolved_unwire
     systemctl stop "$LOCAL_UNIT.service" 2>/dev/null || true
     systemctl start dnsmasq.service
     echo "started dnsmasq.service"
@@ -118,6 +300,16 @@ case "$cmd" in
         echo "$SYSTEM_BIN: $($SYSTEM_BIN --version 2>&1 | head -1)"
     [ -x "$LOCAL_BIN" ] && \
         echo "$LOCAL_BIN: $($LOCAL_BIN --version 2>&1 | head -1)"
+    if [ -e "$RESOLVED_DROPIN" ]; then
+        printf "%-25s %s\n" "resolved->dnsmasq" "wired ($RESOLVED_DROPIN)"
+    else
+        printf "%-25s %s\n" "resolved->dnsmasq" "not wired"
+    fi
+    if command -v resolvectl >/dev/null 2>&1; then
+        _cc=$(resolved_catchall_links | tr '\n' ' ')
+        [ -z "$_cc" ] || printf "%-25s %s\n" "links holding '~.'" \
+            "$_cc  (these beat Global and defeat the wiring)"
+    fi
     ;;
 
   *)
