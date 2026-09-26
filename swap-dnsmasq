@@ -254,6 +254,31 @@ case "$cmd" in
         set -- $filtered
     fi
     systemctl stop dnsmasq.service 2>/dev/null || true
+    # MASK it, do not merely stop it. Stopping is not enough because the packaged
+    # unit gets started behind our back by two routine things:
+    #
+    #   * an apt upgrade of the dnsmasq package. Its postinst chooses restart vs
+    #     start on whether /run/dnsmasq/dnsmasq.pid exists - and OUR instance
+    #     wrote that pidfile, so it takes the restart branch and aims
+    #     /etc/init.d/dnsmasq's stop at it:
+    #        start-stop-daemon --stop --retry=TERM/30/KILL/5 \
+    #            --pidfile /run/dnsmasq/${NAME}.pid --name ${NAME}
+    #     Our process's comm is 'dnsmasq' and that is its pidfile, so the upgrade
+    #     KILLS the patched build. It runs as a systemd-run --collect transient
+    #     unit with no Restart=, so the unit is then garbage-collected and
+    #     nothing brings DNS or DHCP back.
+    #   * a reboot, since the unit stays enabled.
+    #
+    # Masking survives the postinst: deb-systemd-helper's unmask only removes a
+    # mask it created itself (it requires its own state file under
+    # /var/lib/systemd/deb-systemd-helper-masked/), and an admin 'systemctl mask'
+    # never creates one. 'system' unmasks again.
+    if systemctl mask dnsmasq.service >/dev/null 2>&1; then
+        echo "masked dnsmasq.service — a package upgrade or reboot can no longer start it"
+    else
+        echo "WARNING: could not mask dnsmasq.service; an apt upgrade of the dnsmasq" >&2
+        echo "  package may kill this instance (it targets our pidfile by name)." >&2
+    fi
     # Also stop a PREVIOUS instance of our own transient unit. Without this a
     # re-run dies on "unit dnsmasq-local.service already exists", which makes
     # the swap unusable as a restart - and restarting is the only way to pick up
@@ -287,6 +312,14 @@ case "$cmd" in
     # whole box, including anything this script might want to look up.
     resolved_unwire
     systemctl stop "$LOCAL_UNIT.service" 2>/dev/null || true
+    # Unmask unconditionally: 'local' masks it, and a masked unit cannot be
+    # started at all, so without this the swap back is a no-op that leaves the
+    # host with no dnsmasq. Unconditional rather than "only if we masked it" -
+    # asking for the packaged server IS asking for it to be startable, so an
+    # operator's own earlier mask is superseded by this explicit request.
+    if systemctl unmask dnsmasq.service >/dev/null 2>&1; then
+        echo "unmasked dnsmasq.service"
+    fi
     systemctl start dnsmasq.service
     echo "started dnsmasq.service"
     ;;
@@ -300,6 +333,9 @@ case "$cmd" in
         echo "$SYSTEM_BIN: $($SYSTEM_BIN --version 2>&1 | head -1)"
     [ -x "$LOCAL_BIN" ] && \
         echo "$LOCAL_BIN: $($LOCAL_BIN --version 2>&1 | head -1)"
+    _m=$(systemctl is-enabled dnsmasq.service 2>&1 || true)
+    printf "%-25s %s\n" "dnsmasq.service state" \
+        "$_m$([ "$_m" = masked ] && echo '  (packaged unit cannot start — correct while on local)')"
     if [ -e "$RESOLVED_DROPIN" ]; then
         printf "%-25s %s\n" "resolved->dnsmasq" "wired ($RESOLVED_DROPIN)"
     else
